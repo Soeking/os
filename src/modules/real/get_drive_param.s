@@ -15,8 +15,9 @@ get_drive_param:
         mov     es, ax
         mov     di, ax
 
-        mov     ah, 8
+        mov     ah, 0x08
         mov     dl, [si + drive.no]
+        int     0x13
 .10Q:   jc      .10F
 .10T:
         mov     al, cl
