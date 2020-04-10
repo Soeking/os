@@ -108,3 +108,41 @@ vram_font_copy:
         pop     ebp
 
         ret
+
+
+
+vram_bit_copy:
+
+        push    ebp
+        mov     ebp, esp
+
+        push    eax
+        push    ebx
+        push    edi
+
+        mov     edi, [ebp + 12]
+        movzx   eax, byte [ebp + 16]
+        movzx   ebx, word [ebp + 20]
+
+        test    bl, al
+        setz    bl
+        dec     bl
+
+        mov     al, [ebp + 8]
+        mov     ah, al
+        not     ah
+
+        and     ah, [edi]
+        and     al, bl
+        or      al, ah
+
+        mov     [edi], al
+
+        pop     edi
+        pop     ebx
+        pop     eax
+
+        mov     esp, ebp
+        pop     ebp
+
+        ret
