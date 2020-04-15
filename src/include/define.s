@@ -11,3 +11,5 @@
 
         KERNEL_SIZE         equ     (1024 * 8)
         KERNEL_SECT         equ     (KERNEL_SIZE / SECT_SIZE)
+
+        VECT_BASE           equ     0x0010_0000
