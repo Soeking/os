@@ -25,12 +25,17 @@
 		mov		[edi + 4], %3
 	%endif
 
-		mov		[edi + 0], ax
+        mov		[edi + 0], ax
 		shr		eax, 16 
 		mov		[edi + 6], ax
 
 		pop		edi
 		pop		eax
+%endmacro
+
+%macro  outp 2
+        mov     al, %2
+        out     %1, al
 %endmacro
 
 struc drive

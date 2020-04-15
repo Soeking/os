@@ -1,6 +1,39 @@
-int_stop:
+ALIGN 4
+IDTR:   dw      8 * 256 -1
+        dd      VECT_BASE
 
-        sti
+init_int:
+
+        push    eax
+        push    ebx
+        push    ecx
+        push    edi
+
+        lea     eax, [int_default]
+        mov     ebx, 0x0008_8E00
+        xchg    ax, bx
+
+        mov     ecx, 256
+        mov     edi, VECT_BASE
+
+.10L:
+
+        mov     [edi + 0], ebx
+        mov     [edi + 4], eax
+        add     edi, 8
+        loop    .10L
+
+        lidt    [IDTR]
+
+        pop     edi
+        pop     ecx
+        pop     ebx
+        pop     eax
+
+        ret
+
+
+int_stop:
 
         cdecl   draw_str, 25, 15, 0x060F, eax
 
@@ -43,3 +76,15 @@ int_default:
         iret
 
 .s0     db  " <    STOP    > ", 0
+
+
+int_zero_div:
+
+        pushf
+        push    cs
+        push    int_stop
+
+        mov     eax, .s0
+        iret
+
+.s0     db  " <  ZERO DIV  > ", 0
