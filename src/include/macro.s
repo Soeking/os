@@ -44,3 +44,12 @@ struc drive
         .head   resw    1
         .sect   resw    1
 endstruc
+
+%define		RING_ITEM_SIZE		(1 << 4)
+%define		RING_INDEX_MASK		(RING_ITEM_SIZE - 1)
+
+struc ring_buff
+        .rp     resd    1
+        .wp     resd    1
+        .item   resb    RING_ITEM_SIZE
+endstruc
