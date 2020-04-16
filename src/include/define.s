@@ -13,3 +13,10 @@
         KERNEL_SECT         equ     (KERNEL_SIZE / SECT_SIZE)
 
         VECT_BASE           equ     0x0010_0000
+
+
+        STACK_BASE          equ     0x0010_3000
+        STACK_SIZE          equ     1024
+
+        SP_TASK_0           equ     STACK_BASE + (STACK_SIZE * 1)
+        SP_TASK_1           equ     STACK_BASE + (STACK_SIZE * 2)
