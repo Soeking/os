@@ -1,0 +1,1652 @@
+     1                                  %define USE_SYSTEM_CALL
+     2                                  
+     3                                  %include    "../include/define.s"
+     1                              <1>         BOOT_LOAD           equ     0x7C00
+     2                              <1> 
+     3                              <1>         BOOT_SIZE           equ     (1024 * 8)
+     4                              <1>         SECT_SIZE           equ     (512)
+     5                              <1>         BOOT_SECT           equ     (BOOT_SIZE / SECT_SIZE)
+     6                              <1>         BOOT_END            equ     (BOOT_LOAD + BOOT_SIZE)
+     7                              <1> 
+     8                              <1>         E820_RECORD_SIZE    equ     20
+     9                              <1> 
+    10                              <1>         KERNEL_LOAD         equ     0x0010_1000
+    11                              <1> 
+    12                              <1>         KERNEL_SIZE         equ     (1024 * 8)
+    13                              <1>         KERNEL_SECT         equ     (KERNEL_SIZE / SECT_SIZE)
+    14                              <1> 
+    15                              <1>         VECT_BASE           equ     0x0010_0000
+    16                              <1> 
+    17                              <1> 
+    18                              <1>         STACK_BASE          equ     0x0010_3000
+    19                              <1>         STACK_SIZE          equ     1024
+    20                              <1> 
+    21                              <1>         SP_TASK_0           equ     STACK_BASE + (STACK_SIZE * 1)
+    22                              <1>         SP_TASK_1           equ     STACK_BASE + (STACK_SIZE * 2)
+     4                                  %include    "../include/macro.s"
+     1                              <1> %macro  cdecl 1-*.nolist
+     2                              <1> 
+     3                              <1>     %rep  %0 -1
+     4                              <1>         push    %{-1:-1}
+     5                              <1>         %rotate -1
+     6                              <1>     %endrep
+     7                              <1>     %rotate -1
+     8                              <1> 
+     9                              <1>         call    %1
+    10                              <1> 
+    11                              <1>     %if  1 < %0
+    12                              <1>         add     sp, (__BITS__ >> 3) * (%0 - 1)
+    13                              <1>     %endif
+    14                              <1> 
+    15                              <1> %endmacro
+    16                              <1> 
+    17                              <1> %macro  set_vect 1-*.nolist
+    18                              <1> 		push	eax
+    19                              <1> 		push	edi
+    20                              <1> 
+    21                              <1> 		mov		edi, VECT_BASE + (%1 * 8)
+    22                              <1> 		mov		eax, %2
+    23                              <1> 
+    24                              <1> 	%if 3 == %0
+    25                              <1> 		mov		[edi + 4], %3
+    26                              <1> 	%endif
+    27                              <1> 
+    28                              <1>         mov		[edi + 0], ax
+    29                              <1> 		shr		eax, 16 
+    30                              <1> 		mov		[edi + 6], ax
+    31                              <1> 
+    32                              <1> 		pop		edi
+    33                              <1> 		pop		eax
+    34                              <1> %endmacro
+    35                              <1> 
+    36                              <1> %macro  outp 2
+    37                              <1>         mov     al, %2
+    38                              <1>         out     %1, al
+    39                              <1> %endmacro
+    40                              <1> 
+    41                              <1> %macro  set_desc 2-*
+    42                              <1>         push    eax
+    43                              <1>         push    edi
+    44                              <1> 
+    45                              <1>         mov     edi, %1
+    46                              <1>         mov     eax, %2
+    47                              <1> 
+    48                              <1>     %if 3 == %0
+    49                              <1>         mov     [edi + 0], %3
+    50                              <1>     %endif
+    51                              <1> 
+    52                              <1>         mov     [edi + 2], ax
+    53                              <1>         shr     eax, 16
+    54                              <1>         mov     [edi + 4], al
+    55                              <1>         mov     [edi + 7], ah
+    56                              <1> 
+    57                              <1>         pop     edi
+    58                              <1>         pop     eax
+    59                              <1> %endmacro
+    60                              <1> 
+    61                              <1> %macro  set_gate 2-*
+    62                              <1>         push    eax
+    63                              <1>         push    edi
+    64                              <1> 
+    65                              <1>         mov     edi, %1
+    66                              <1>         mov     eax, %2
+    67                              <1> 
+    68                              <1>         mov     [edi + 0], ax
+    69                              <1>         shr     eax, 16
+    70                              <1>         mov     [edi + 6], ax
+    71                              <1> 
+    72                              <1>         pop     edi
+    73                              <1>         pop     eax
+    74                              <1> %endmacro
+    75                              <1> 
+    76                              <1> struc drive
+    77 00000000 <res 00000002>      <1>         .no     resw    1
+    78 00000002 <res 00000002>      <1>         .cyln   resw    1
+    79 00000004 <res 00000002>      <1>         .head   resw    1
+    80 00000006 <res 00000002>      <1>         .sect   resw    1
+    81                              <1> endstruc
+    82                              <1> 
+    83                              <1> %define		RING_ITEM_SIZE		(1 << 4)
+    84                              <1> %define		RING_INDEX_MASK		(RING_ITEM_SIZE - 1)
+    85                              <1> 
+    86                              <1> struc ring_buff
+    87 00000000 <res 00000004>      <1>         .rp     resd    1
+    88 00000004 <res 00000004>      <1>         .wp     resd    1
+    89 00000008 <res 00000010>      <1>         .item   resb    RING_ITEM_SIZE
+    90                              <1> endstruc
+     5                                  
+     6                                          ORG     KERNEL_LOAD
+     7                                  
+     8                                  [BITS 32]
+     9                                  
+    10                                  kernel:
+    11                                  
+    12 00000000 BE007E0000                      mov     esi, BOOT_LOAD + SECT_SIZE
+    13 00000005 0FB706                          movzx   eax, word [esi + 0]
+    14 00000008 0FB75E02                        movzx   ebx, word [esi + 2]
+    15 0000000C C1E004                          shl     eax, 4
+    16 0000000F 01D8                            add     eax, ebx
+    17 00000011 A3[D0010000]                    mov     [FONT_ADR], eax
+    18                                  
+    19                                          set_desc    GDT.tss_0, TSS_0
+    19 00000016 50                  <1>  push eax
+    19 00000017 57                  <1>  push edi
+    19                              <1> 
+    19 00000018 BF[C8020000]        <1>  mov edi, %1
+    19 0000001D B8[D8010000]        <1>  mov eax, %2
+    19                              <1> 
+    19                              <1>  %if 3 == %0
+    19                              <1>  mov [edi + 0], %3
+    19                              <1>  %endif
+    19                              <1> 
+    19 00000022 66894702            <1>  mov [edi + 2], ax
+    19 00000026 C1E810              <1>  shr eax, 16
+    19 00000029 884704              <1>  mov [edi + 4], al
+    19 0000002C 886707              <1>  mov [edi + 7], ah
+    19                              <1> 
+    19 0000002F 5F                  <1>  pop edi
+    19 00000030 58                  <1>  pop eax
+    20                                          set_desc    GDT.tss_1, TSS_1
+    20 00000031 50                  <1>  push eax
+    20 00000032 57                  <1>  push edi
+    20                              <1> 
+    20 00000033 BF[D0020000]        <1>  mov edi, %1
+    20 00000038 B8[40020000]        <1>  mov eax, %2
+    20                              <1> 
+    20                              <1>  %if 3 == %0
+    20                              <1>  mov [edi + 0], %3
+    20                              <1>  %endif
+    20                              <1> 
+    20 0000003D 66894702            <1>  mov [edi + 2], ax
+    20 00000041 C1E810              <1>  shr eax, 16
+    20 00000044 884704              <1>  mov [edi + 4], al
+    20 00000047 886707              <1>  mov [edi + 7], ah
+    20                              <1> 
+    20 0000004A 5F                  <1>  pop edi
+    20 0000004B 58                  <1>  pop eax
+    21                                  
+    22                                          set_gate    GDT.call_gate, call_gate
+    22 0000004C 50                  <1>  push eax
+    22 0000004D 57                  <1>  push edi
+    22                              <1> 
+    22 0000004E BF[D8020000]        <1>  mov edi, %1
+    22 00000053 B8[600C0000]        <1>  mov eax, %2
+    22                              <1> 
+    22 00000058 668907              <1>  mov [edi + 0], ax
+    22 0000005B C1E810              <1>  shr eax, 16
+    22 0000005E 66894706            <1>  mov [edi + 6], ax
+    22                              <1> 
+    22 00000062 5F                  <1>  pop edi
+    22 00000063 58                  <1>  pop eax
+    23                                  
+    24                                          set_desc    GDT.ldt, LDT, word LDT_LIMIT
+    24 00000064 50                  <1>  push eax
+    24 00000065 57                  <1>  push edi
+    24                              <1> 
+    24 00000066 BF[C0020000]        <1>  mov edi, %1
+    24 0000006B B8[E6020000]        <1>  mov eax, %2
+    24                              <1> 
+    24                              <1>  %if 3 == %0
+    24 00000070 66C7072700          <1>  mov [edi + 0], %3
+    24                              <1>  %endif
+    24                              <1> 
+    24 00000075 66894702            <1>  mov [edi + 2], ax
+    24 00000079 C1E810              <1>  shr eax, 16
+    24 0000007C 884704              <1>  mov [edi + 4], al
+    24 0000007F 886707              <1>  mov [edi + 7], ah
+    24                              <1> 
+    24 00000082 5F                  <1>  pop edi
+    24 00000083 58                  <1>  pop eax
+    25                                  
+    26 00000084 0F0115[E0020000]                lgdt    [GDTR]
+    27                                  
+    28 0000008B BC00341000                      mov     esp, SP_TASK_0
+    29                                  
+    30 00000090 66B82000                        mov     ax, SS_TASK_0
+    31 00000094 0F00D8                          ltr     ax
+    32                                  
+    33 00000097 E89A080000                      cdecl   init_int
+    34 0000009C E81B0A0000                      cdecl   init_pic
+    35                                  
+    36 000000A1 5057BF00001000B8-               set_vect    0x00, int_zero_div
+    36 000000A9 [9E0A0000]668907C1-
+    36 000000B1 E810668947065F58   
+    37 000000B9 5057BF00011000B8-               set_vect    0x20, int_timer
+    37 000000C1 [0E030000]668907C1-
+    37 000000C9 E810668947065F58   
+    38 000000D1 5057BF08011000B8-               set_vect    0x21, int_keyboard
+    38 000000D9 [260B0000]668907C1-
+    38 000000E1 E810668947065F58   
+    39 000000E9 5057BF40011000B8-               set_vect    0x28, int_rtc
+    39 000000F1 [FB0A0000]668907C1-
+    39 000000F9 E810668947065F58   
+    40 00000101 5057BF08041000B8-               set_vect    0x81, trap_gate_81, word 0xEF00
+    40 00000109 [900C0000]66C74704-
+    40 00000111 00EF668907C1E81066-
+    40 0000011A 8947065F58         
+    41 0000011F 5057BF10041000B8-               set_vect    0x82, trap_gate_82, word 0xEF00
+    41 00000127 [9E0C0000]66C74704-
+    41 0000012F 00EF668907C1E81066-
+    41 00000138 8947065F58         
+    42                                  
+    43 0000013D 6A10E8A30900006683-             cdecl   rtc_int_en, 0x10
+    43 00000146 C404               
+    44 00000148 E8CB0A0000                      cdecl   int_en_timer0
+    45                                  
+    46                                          outp    0x21, 0b1111_1000
+    46 0000014D B0F8                <1>  mov al, %2
+    46 0000014F E621                <1>  out %1, al
+    47                                          outp    0xA1, 0b1111_1110
+    47 00000151 B0FE                <1>  mov al, %2
+    47 00000153 E6A1                <1>  out %1, al
+    48                                  
+    49 00000155 FB                              sti
+    50                                  
+    51 00000156 6A0D6A3FE895030000-             cdecl   draw_font, 63, 13
+    51 0000015F 6683C408           
+    52 00000163 6A046A3FE80B040000-             cdecl   draw_color_bar, 63, 4
+    52 0000016C 6683C408           
+    53 00000170 68[B8010000]680F01-             cdecl   draw_str, 25, 14, 0x010F, .s0
+    53 00000178 00006A0E6A19E8B603-
+    53 00000181 00006683C410       
+    54                                  
+    55                                  .10L:
+    56                                  
+    57 00000187 E89B0A0000                      cdecl   draw_rotation_bar
+    58                                  
+    59 0000018C 68[CC010000]68-                 cdecl   ring_rd, _KEY_BUFF, .int_key
+    59 00000192 [4C0B0000]E8C90900-
+    59 0000019A 006683C408         
+    60 0000019F 83F800                          cmp     eax, 0
+    61 000001A2 7412                            je      .10E
+    62                                  
+    63 000001A4 68[4C0B0000]6A1D6A-             cdecl   draw_key, 2, 29, _KEY_BUFF
+    63 000001AC 02E8130A00006683C4-
+    63 000001B5 0C                 
+    64                                  .10E:
+    65                                  
+    66 000001B6 EBCF                            jmp     .10L
+    67                                  
+    68 000001B8 2048656C6C6F2C206B-     .s0 	db	" Hello, kernel! ", 0
+    68 000001C1 65726E656C212000   
+    69                                  
+    70 000001C9 00<rept>                ALIGN 4, db 0
+    71 000001CC 00000000                .int_key    dd 0
+    72                                  
+    73                                  ALIGN 4, db 0
+    74 000001D0 00000000                FONT_ADR:   dd 0
+    75 000001D4 00000000                RTC_TIME:   dd 0
+    76                                  
+    77                                  %include    "descriptor.s"
+     1                              <1> TSS_0:
+     2 000001D8 00000000            <1> .link:          dd  0
+     3 000001DC 00321000            <1> .esp0:          dd  SP_TASK_0 - 512
+     4 000001E0 10000000            <1> .ss0:           dd  DS_KERNEL
+     5 000001E4 00000000            <1> .esp1:          dd  0
+     6 000001E8 00000000            <1> .ss1:           dd  0
+     7 000001EC 00000000            <1> .esp2:          dd  0
+     8 000001F0 00000000            <1> .ss2:           dd  0
+     9 000001F4 00000000            <1> .cr3:           dd  0
+    10 000001F8 00000000            <1> .eip:           dd  0
+    11 000001FC 00000000            <1> .eflags:        dd  0
+    12 00000200 00000000            <1> .eax:           dd  0
+    13 00000204 00000000            <1> .ecx:           dd  0
+    14 00000208 00000000            <1> .edx:           dd  0
+    15 0000020C 00000000            <1> .ebx:           dd  0
+    16 00000210 00000000            <1> .esp:           dd  0
+    17 00000214 00000000            <1> .ebp:           dd  0
+    18 00000218 00000000            <1> .esi:           dd  0
+    19 0000021C 00000000            <1> .edi:           dd  0
+    20 00000220 00000000            <1> .es:            dd  0
+    21 00000224 00000000            <1> .cs:            dd  0
+    22 00000228 00000000            <1> .ss:            dd  0
+    23 0000022C 00000000            <1> .ds:            dd  0
+    24 00000230 00000000            <1> .fs:            dd  0
+    25 00000234 00000000            <1> .gs:            dd  0
+    26 00000238 00000000            <1> .ldt:           dd  0
+    27 0000023C 00000000            <1> .io:            dd  0
+    28                              <1> 
+    29                              <1> TSS_1:
+    30 00000240 00000000            <1> .link:          dd  0
+    31 00000244 00361000            <1> .esp0:          dd  SP_TASK_1 - 512
+    32 00000248 10000000            <1> .ss0:           dd  DS_KERNEL
+    33 0000024C 00000000            <1> .esp1:          dd  0
+    34 00000250 00000000            <1> .ss1:           dd  0
+    35 00000254 00000000            <1> .esp2:          dd  0
+    36 00000258 00000000            <1> .ss2:           dd  0
+    37 0000025C 00000000            <1> .cr3:           dd  0
+    38 00000260 [48030000]          <1> .eip:           dd  task_1
+    39 00000264 02020000            <1> .eflags:        dd  0x0202
+    40 00000268 00000000            <1> .eax:           dd  0
+    41 0000026C 00000000            <1> .ecx:           dd  0
+    42 00000270 00000000            <1> .edx:           dd  0
+    43 00000274 00000000            <1> .ebx:           dd  0
+    44 00000278 00381000            <1> .esp:           dd  SP_TASK_1
+    45 0000027C 00000000            <1> .ebp:           dd  0
+    46 00000280 00000000            <1> .esi:           dd  0
+    47 00000284 00000000            <1> .edi:           dd  0
+    48 00000288 27000000            <1> .es:            dd  DS_TASK_1
+    49 0000028C 1F000000            <1> .cs:            dd  CS_TASK_1
+    50 00000290 27000000            <1> .ss:            dd  DS_TASK_1
+    51 00000294 27000000            <1> .ds:            dd  DS_TASK_1
+    52 00000298 27000000            <1> .fs:            dd  DS_TASK_1
+    53 0000029C 27000000            <1> .gs:            dd  DS_TASK_1
+    54 000002A0 18000000            <1> .ldt:           dd  SS_LDT
+    55 000002A4 00000000            <1> .io:            dd  0
+    56                              <1> 
+    57 000002A8 0000000000000000    <1> GDT:            dq  0x0000000000000000
+    58 000002B0 FFFF0000009ACF00    <1> .cs_kernel:     dq  0x00CF9A000000FFFF
+    59 000002B8 FFFF00000092CF00    <1> .ds_kernel:     dq  0x00CF92000000FFFF
+    60 000002C0 0000000000820000    <1> .ldt            dq  0x0000820000000000
+    61 000002C8 6700000000890000    <1> .tss_0:         dq  0x0000890000000067
+    62 000002D0 6700000000890000    <1> .tss_1:         dq  0x0000890000000067
+    63 000002D8 0000080004EC0000    <1> .call_gate:     dq  0x0000EC0400080000
+    64                              <1> .end:
+    65                              <1> 
+    66                              <1> CS_KERNEL       equ .cs_kernel  - GDT
+    67                              <1> DS_KERNEL       equ .ds_kernel  - GDT
+    68                              <1> SS_LDT          equ .ldt        - GDT
+    69                              <1> SS_TASK_0       equ .tss_0      - GDT
+    70                              <1> SS_TASK_1       equ .tss_1      - GDT
+    71                              <1> SS_GATE_0       equ .call_gate  - GDT
+    72                              <1> 
+    73 000002E0 3700                <1> GDTR:   dw      GDT.end - GDT - 1
+    74 000002E2 [A8020000]          <1>         dd      GDT
+    75                              <1> 
+    76 000002E6 0000000000000000    <1> LDT:            dq  0x0000000000000000
+    77 000002EE FFFF0000009ACF00    <1> .cs_task_0:     dq  0x00CF9A000000FFFF
+    78 000002F6 FFFF00000092CF00    <1> .ds_task_0:     dq  0x00CF92000000FFFF
+    79 000002FE FFFF000000FACF00    <1> .cs_task_1:     dq  0x00CFFA000000FFFF
+    80 00000306 FFFF000000F2CF00    <1> .ds_task_1:     dq  0x00CFF2000000FFFF
+    81                              <1> .end:
+    82                              <1> 
+    83                              <1> CS_TASK_0       equ (.cs_task_0 - LDT) | 4
+    84                              <1> DS_TASK_0       equ (.ds_task_0 - LDT) | 4
+    85                              <1> CS_TASK_1       equ (.cs_task_1 - LDT) | 4 | 3
+    86                              <1> DS_TASK_1       equ (.ds_task_1 - LDT) | 4 | 3
+    87                              <1> 
+    88                              <1> LDT_LIMIT       equ .end        - LDT - 1
+    78                                  %include    "modules/int_timer.s"
+     1                              <1> int_timer:
+     2                              <1> 
+     3 0000030E 60                  <1>         pusha
+     4 0000030F 1E                  <1>         push    ds
+     5 00000310 06                  <1>         push    es
+     6                              <1> 
+     7 00000311 66B81000            <1>         mov     ax, 0x0010
+     8 00000315 8ED8                <1>         mov     ds, ax
+     9 00000317 8EC0                <1>         mov     es, ax
+    10                              <1> 
+    11 00000319 FF05[44030000]      <1>         inc     dword [TIMER_COUNT]
+    12                              <1> 
+    13                              <1>         outp    0x20, 0x20
+    13 0000031F B020                <2>  mov al, %2
+    13 00000321 E620                <2>  out %1, al
+    14                              <1> 
+    15 00000323 660F00C8            <1>         str     ax
+    16 00000327 6683F820            <1>         cmp     ax, SS_TASK_0
+    17 0000032B 7409                <1>         je      .11L
+    18                              <1> 
+    19 0000032D EA000000002000      <1>         jmp     SS_TASK_0:0
+    20 00000334 EB09                <1>         jmp     .10E
+    21                              <1> 
+    22                              <1> .11L:
+    23 00000336 EA000000002800      <1>         jmp     SS_TASK_1:0
+    24 0000033D EB00                <1>         jmp     .10E
+    25                              <1> .10E:
+    26                              <1> 
+    27 0000033F 07                  <1>         pop     es
+    28 00000340 1F                  <1>         pop     ds
+    29 00000341 61                  <1>         popa
+    30                              <1> 
+    31 00000342 CF                  <1>         iret
+    32                              <1> 
+    33 00000343 00                  <1> ALIGN 4, db 0
+    34 00000344 00000000            <1> TIMER_COUNT     dd 0
+    79                                  %include    "tasks/task_1.s"
+     1                              <1> task_1:
+     2                              <1> 
+     3 00000348 68[76030000]6A076A- <1>         cdecl   draw_str, 63, 0, 0x07, .s0
+     3 00000350 006A3FE8E101000066- <1>
+     3 00000359 83C410              <1>
+     4                              <1> .10L:
+     5                              <1> 
+     6 0000035C A1[D4010000]        <1>         mov     eax, [RTC_TIME]
+     7 00000361 5068000700006A006A- <1>         cdecl   draw_time, 72, 0, 0x0700, eax
+     7 0000036A 48E8280500006683C4- <1>
+     7 00000373 10                  <1>
+     8                              <1> 
+     9 00000374 EBE6                <1>         jmp     .10L
+    10                              <1> 
+    11 00000376 5461736B2D3100      <1> .s0     db  "Task-1", 0
+    80                                  
+    81                                  %include    "../modules/protect/vga.s"
+     1                              <1> vga_set_read_plane:
+     2                              <1> 
+     3 0000037D 55                  <1>         push    ebp
+     4 0000037E 89E5                <1>         mov     ebp, esp
+     5                              <1> 
+     6 00000380 50                  <1>         push    eax
+     7 00000381 52                  <1>         push    edx
+     8                              <1> 
+     9 00000382 8A6508              <1>         mov     ah, [ebp + 8]
+    10 00000385 80E403              <1>         and     ah, 0x03
+    11 00000388 B004                <1>         mov     al, 0x04
+    12 0000038A 66BACE03            <1>         mov     dx, 0x03CE
+    13 0000038E 66EF                <1>         out     dx, ax
+    14                              <1> 
+    15 00000390 5A                  <1>         pop     edx
+    16 00000391 58                  <1>         pop     eax
+    17                              <1> 
+    18 00000392 89EC                <1>         mov     esp, ebp
+    19 00000394 5D                  <1>         pop     ebp
+    20                              <1> 
+    21 00000395 C3                  <1>         ret
+    22                              <1> 
+    23                              <1> 
+    24                              <1> vga_set_write_plane:
+    25                              <1> 
+    26 00000396 55                  <1>          push    ebp
+    27 00000397 89E5                <1>          mov     ebp, esp
+    28                              <1>  
+    29 00000399 50                  <1>          push    eax
+    30 0000039A 52                  <1>          push    edx
+    31                              <1>  
+    32 0000039B 8A6508              <1>          mov     ah, [ebp + 8]
+    33 0000039E 80E40F              <1>          and     ah, 0x0F
+    34 000003A1 B002                <1>          mov     al, 0x02
+    35 000003A3 66BAC403            <1>          mov     dx, 0x03C4
+    36 000003A7 66EF                <1>          out     dx, ax
+    37                              <1>  
+    38 000003A9 5A                  <1>          pop     edx
+    39 000003AA 58                  <1>          pop     eax
+    40                              <1>  
+    41 000003AB 89EC                <1>          mov     esp, ebp
+    42 000003AD 5D                  <1>          pop     ebp
+    43                              <1>  
+    44 000003AE C3                  <1>          ret
+    45                              <1> 
+    46                              <1> 
+    47                              <1> vram_font_copy:
+    48                              <1> 
+    49 000003AF 55                  <1>         push    ebp
+    50 000003B0 89E5                <1>         mov     ebp, esp
+    51                              <1> 
+    52 000003B2 50                  <1>         push    eax
+    53 000003B3 53                  <1>         push    ebx
+    54 000003B4 51                  <1>         push    ecx
+    55 000003B5 52                  <1>         push    edx
+    56 000003B6 56                  <1>         push    esi
+    57 000003B7 57                  <1>         push    edi
+    58                              <1> 
+    59 000003B8 8B7508              <1>         mov     esi, [ebp + 8]
+    60 000003BB 8B7D0C              <1>         mov     edi, [ebp + 12]
+    61 000003BE 0FB64510            <1>         movzx   eax, byte [ebp + 16]
+    62 000003C2 0FB75D14            <1>         movzx   ebx, word [ebp + 20]
+    63                              <1> 
+    64 000003C6 84C7                <1>         test    bh, al
+    65 000003C8 0F94C6              <1>         setz    dh
+    66 000003CB FECE                <1>         dec     dh
+    67                              <1> 
+    68 000003CD 84C3                <1>         test    bl, al
+    69 000003CF 0F94C2              <1>         setz    dl
+    70 000003D2 FECA                <1>         dec     dl
+    71                              <1> 
+    72 000003D4 FC                  <1>         cld
+    73                              <1> 
+    74 000003D5 B910000000          <1>         mov     ecx, 16
+    75                              <1> .10L:
+    76                              <1> 
+    77 000003DA AC                  <1>         lodsb
+    78 000003DB 88C4                <1>         mov     ah, al
+    79 000003DD F6D4                <1>         not     ah
+    80                              <1> 
+    81 000003DF 20D0                <1>         and     al, dl
+    82                              <1> 
+    83 000003E1 F7C310000000        <1>         test    ebx, 0x0010
+    84 000003E7 7404                <1>         jz      .11F
+    85 000003E9 2227                <1>         and     ah, [edi]
+    86 000003EB EB02                <1>         jmp     .11E
+    87                              <1> .11F:
+    88                              <1> 
+    89 000003ED 20F4                <1>         and     ah, dh
+    90                              <1> .11E:
+    91                              <1> 
+    92 000003EF 08E0                <1>         or      al, ah
+    93                              <1> 
+    94 000003F1 8807                <1>         mov     [edi], al
+    95                              <1> 
+    96 000003F3 83C750              <1>         add     edi, 80
+    97 000003F6 E2E2                <1>         loop    .10L
+    98                              <1> .10E:
+    99                              <1> 
+   100 000003F8 5F                  <1>         pop     edi
+   101 000003F9 5E                  <1>         pop     esi
+   102 000003FA 5A                  <1>         pop     edx
+   103 000003FB 59                  <1>         pop     ecx
+   104 000003FC 5B                  <1>         pop     ebx
+   105 000003FD 58                  <1>         pop     eax
+   106                              <1> 
+   107 000003FE 89EC                <1>         mov     esp, ebp
+   108 00000400 5D                  <1>         pop     ebp
+   109                              <1> 
+   110 00000401 C3                  <1>         ret
+   111                              <1> 
+   112                              <1> 
+   113                              <1> 
+   114                              <1> vram_bit_copy:
+   115                              <1> 
+   116 00000402 55                  <1>         push    ebp
+   117 00000403 89E5                <1>         mov     ebp, esp
+   118                              <1> 
+   119 00000405 50                  <1>         push    eax
+   120 00000406 53                  <1>         push    ebx
+   121 00000407 57                  <1>         push    edi
+   122                              <1> 
+   123 00000408 8B7D0C              <1>         mov     edi, [ebp + 12]
+   124 0000040B 0FB64510            <1>         movzx   eax, byte [ebp + 16]
+   125 0000040F 0FB75D14            <1>         movzx   ebx, word [ebp + 20]
+   126                              <1> 
+   127 00000413 84C3                <1>         test    bl, al
+   128 00000415 0F94C3              <1>         setz    bl
+   129 00000418 FECB                <1>         dec     bl
+   130                              <1> 
+   131 0000041A 8A4508              <1>         mov     al, [ebp + 8]
+   132 0000041D 88C4                <1>         mov     ah, al
+   133 0000041F F6D4                <1>         not     ah
+   134                              <1> 
+   135 00000421 2227                <1>         and     ah, [edi]
+   136 00000423 20D8                <1>         and     al, bl
+   137 00000425 08E0                <1>         or      al, ah
+   138                              <1> 
+   139 00000427 8807                <1>         mov     [edi], al
+   140                              <1> 
+   141 00000429 5F                  <1>         pop     edi
+   142 0000042A 5B                  <1>         pop     ebx
+   143 0000042B 58                  <1>         pop     eax
+   144                              <1> 
+   145 0000042C 89EC                <1>         mov     esp, ebp
+   146 0000042E 5D                  <1>         pop     ebp
+   147                              <1> 
+   148 0000042F C3                  <1>         ret
+    82                                  %include    "../modules/protect/draw_char.s"
+     1                              <1> draw_char:
+     2                              <1> 
+     3 00000430 55                  <1>         push    ebp
+     4 00000431 89E5                <1>         mov     ebp, esp
+     5                              <1> 
+     6 00000433 50                  <1>         push    eax
+     7 00000434 53                  <1>         push    ebx
+     8 00000435 51                  <1>         push    ecx
+     9 00000436 52                  <1>         push    edx
+    10 00000437 56                  <1>         push    esi
+    11 00000438 57                  <1>         push    edi
+    12                              <1> 
+    13 00000439 0FB67514            <1>         movzx   esi, byte [ebp + 20]
+    14 0000043D C1E604              <1>         shl     esi, 4
+    15 00000440 0335[D0010000]      <1>         add     esi, [FONT_ADR]
+    16                              <1> 
+    17 00000446 8B7D0C              <1>         mov     edi, [ebp + 12]
+    18 00000449 C1E708              <1>         shl     edi, 8
+    19 0000044C 8DBCBF00000A00      <1>         lea     edi, [edi * 4 + edi + 0xA0000]
+    20 00000453 037D08              <1>         add     edi, [ebp + 8]
+    21                              <1> 
+    22 00000456 0FB75D10            <1>         movzx   ebx, word [ebp + 16]
+    23                              <1> 
+    24 0000045A 6A03E81CFFFFFF6683- <1>         cdecl   vga_set_read_plane, 0x03
+    24 00000463 C404                <1>
+    25 00000465 6A08E82AFFFFFF6683- <1>         cdecl   vga_set_write_plane, 0x08
+    25 0000046E C404                <1>
+    26 00000470 536A085756E835FFFF- <1>         cdecl   vram_font_copy, esi, edi, 0x08, ebx
+    26 00000479 FF6683C410          <1>
+    27                              <1> 
+    28 0000047E 6A02E8F8FEFFFF6683- <1>         cdecl   vga_set_read_plane, 0x02
+    28 00000487 C404                <1>
+    29 00000489 6A04E806FFFFFF6683- <1>         cdecl   vga_set_write_plane, 0x04
+    29 00000492 C404                <1>
+    30 00000494 536A045756E811FFFF- <1>         cdecl   vram_font_copy, esi, edi, 0x04, ebx
+    30 0000049D FF6683C410          <1>
+    31                              <1> 
+    32 000004A2 6A01E8D4FEFFFF6683- <1>         cdecl   vga_set_read_plane, 0x01
+    32 000004AB C404                <1>
+    33 000004AD 6A02E8E2FEFFFF6683- <1>         cdecl   vga_set_write_plane, 0x02
+    33 000004B6 C404                <1>
+    34 000004B8 536A025756E8EDFEFF- <1>         cdecl   vram_font_copy, esi, edi, 0x02, ebx
+    34 000004C1 FF6683C410          <1>
+    35                              <1> 
+    36 000004C6 6A00E8B0FEFFFF6683- <1>         cdecl   vga_set_read_plane, 0x00
+    36 000004CF C404                <1>
+    37 000004D1 6A01E8BEFEFFFF6683- <1>         cdecl   vga_set_write_plane, 0x01
+    37 000004DA C404                <1>
+    38 000004DC 536A015756E8C9FEFF- <1>         cdecl   vram_font_copy, esi, edi, 0x01, ebx
+    38 000004E5 FF6683C410          <1>
+    39                              <1> 
+    40 000004EA 5F                  <1>         pop     edi
+    41 000004EB 5E                  <1>         pop     esi
+    42 000004EC 5A                  <1>         pop     edx
+    43 000004ED 59                  <1>         pop     ecx
+    44 000004EE 5B                  <1>         pop     ebx
+    45 000004EF 58                  <1>         pop     eax
+    46                              <1> 
+    47 000004F0 89EC                <1>         mov     esp, ebp
+    48 000004F2 5D                  <1>         pop     ebp
+    49                              <1> 
+    50 000004F3 C3                  <1>         ret
+    83                                  %include    "../modules/protect/draw_font.s"
+     1                              <1> draw_font:
+     2                              <1> 
+     3 000004F4 55                  <1>         push    ebp
+     4 000004F5 89E5                <1>         mov     ebp, esp
+     5                              <1> 
+     6 000004F7 50                  <1>         push    eax
+     7 000004F8 53                  <1>         push    ebx
+     8 000004F9 51                  <1>         push    ecx
+     9 000004FA 52                  <1>         push    edx
+    10 000004FB 56                  <1>         push    esi
+    11 000004FC 57                  <1>         push    edi
+    12                              <1> 
+    13 000004FD 8B7508              <1>         mov     esi, [ebp + 8]
+    14 00000500 8B7D0C              <1>         mov     edi, [ebp + 12]
+    15                              <1> 
+    16 00000503 B900000000          <1>         mov     ecx, 0
+    17 00000508 81F900010000        <1> .10L:   cmp     ecx, 256
+    18 0000050E 731F                <1>         jae     .10E
+    19                              <1> 
+    20 00000510 89C8                <1>         mov     eax, ecx
+    21 00000512 83E00F              <1>         and     eax, 0x0F
+    22 00000515 01F0                <1>         add     eax, esi
+    23                              <1> 
+    24 00000517 89CB                <1>         mov     ebx, ecx
+    25 00000519 C1EB04              <1>         shr     ebx, 4
+    26 0000051C 01FB                <1>         add     ebx, edi
+    27                              <1> 
+    28 0000051E 516A075350E808FFFF- <1>         cdecl   draw_char, eax, ebx, 0x07, ecx
+    28 00000527 FF6683C410          <1>
+    29                              <1> 
+    30 0000052C 41                  <1>         inc     ecx
+    31 0000052D EBD9                <1>         jmp     .10L
+    32                              <1> .10E:
+    33                              <1> 
+    34 0000052F 5F                  <1>         pop     edi
+    35 00000530 5E                  <1>         pop     esi
+    36 00000531 5A                  <1>         pop     edx
+    37 00000532 59                  <1>         pop     ecx
+    38 00000533 5B                  <1>         pop     ebx
+    39 00000534 58                  <1>         pop     eax
+    40                              <1> 
+    41 00000535 89EC                <1>         mov     esp, ebp
+    42 00000537 5D                  <1>         pop     ebp
+    43                              <1> 
+    44 00000538 C3                  <1>         ret
+    84                                  %include    "../modules/protect/draw_str.s"
+     1                              <1> draw_str:
+     2                              <1> 
+     3 00000539 55                  <1>         push    ebp
+     4 0000053A 89E5                <1>         mov     ebp, esp
+     5                              <1> 
+     6 0000053C 50                  <1>         push    eax
+     7 0000053D 53                  <1>         push    ebx
+     8 0000053E 51                  <1>         push    ecx
+     9 0000053F 52                  <1>         push    edx
+    10 00000540 56                  <1>         push    esi
+    11                              <1> 
+    12 00000541 8B4D08              <1>         mov     ecx, [ebp + 8]
+    13 00000544 8B550C              <1>         mov     edx, [ebp + 12]
+    14 00000547 0FB75D10            <1>         movzx   ebx, word [ebp + 16]
+    15 0000054B 8B7514              <1>         mov     esi, [ebp + 20]
+    16                              <1> 
+    17 0000054E FC                  <1>         cld
+    18                              <1> .10L:
+    19                              <1> 
+    20 0000054F AC                  <1>         lodsb
+    21 00000550 3C00                <1>         cmp     al, 0
+    22 00000552 741A                <1>         je      .10E
+    23                              <1> 
+    24                              <1> %ifdef  USE_SYSTEM_CALL
+    25 00000554 CD81                <1>         int     0x81
+    26                              <1> %else
+    27                              <1>         cdecl   draw_char, ecx, edx, ebx, eax
+    28                              <1> %endif
+    29                              <1> 
+    30 00000556 41                  <1>         inc     ecx
+    31 00000557 83F950              <1>         cmp     ecx, 80
+    32 0000055A 7C10                <1>         jl      .12E
+    33 0000055C B900000000          <1>         mov     ecx, 0
+    34 00000561 42                  <1>         inc     edx
+    35 00000562 83FA1E              <1>         cmp     edx, 30
+    36 00000565 7C05                <1>         jl      .12E
+    37 00000567 BA00000000          <1>         mov     edx, 0
+    38                              <1> 
+    39                              <1> .12E:
+    40 0000056C EBE1                <1>         jmp     .10L
+    41                              <1> .10E:
+    42                              <1> 
+    43 0000056E 5E                  <1>         pop     esi
+    44 0000056F 5A                  <1>         pop     edx
+    45 00000570 59                  <1>         pop     ecx
+    46 00000571 5B                  <1>         pop     ebx
+    47 00000572 58                  <1>         pop     eax
+    48                              <1> 
+    49 00000573 89EC                <1>         mov     esp, ebp
+    50 00000575 5D                  <1>         pop     ebp
+    51                              <1> 
+    52 00000576 C3                  <1>         ret
+    85                                  %include    "../modules/protect/draw_color_bar.s"
+     1                              <1> draw_color_bar:
+     2                              <1> 
+     3 00000577 55                  <1>         push    ebp
+     4 00000578 89E5                <1>         mov     ebp, esp
+     5                              <1> 
+     6 0000057A 50                  <1>         push    eax
+     7 0000057B 53                  <1>         push    ebx
+     8 0000057C 51                  <1>         push    ecx
+     9 0000057D 52                  <1>         push    edx
+    10 0000057E 56                  <1>         push    esi
+    11 0000057F 57                  <1>         push    edi
+    12                              <1> 
+    13 00000580 8B7508              <1>         mov     esi, [ebp + 8]
+    14 00000583 8B7D0C              <1>         mov     edi, [ebp + 12]
+    15                              <1> 
+    16 00000586 B900000000          <1>         mov     ecx, 0
+    17 0000058B 83F910              <1> .10L:   cmp     ecx, 16
+    18 0000058E 732E                <1>         jae     .10E
+    19                              <1> 
+    20 00000590 89C8                <1>         mov     eax, ecx
+    21 00000592 83E001              <1>         and     eax, 0x01
+    22 00000595 C1E003              <1>         shl     eax, 3
+    23 00000598 01F0                <1>         add     eax, esi
+    24                              <1> 
+    25 0000059A 89CB                <1>         mov     ebx, ecx
+    26 0000059C D1EB                <1>         shr     ebx, 1
+    27 0000059E 01FB                <1>         add     ebx, edi
+    28                              <1> 
+    29 000005A0 89CA                <1>         mov     edx, ecx
+    30 000005A2 D1E2                <1>         shl     edx, 1
+    31 000005A4 8B92[D2050000]      <1>         mov     edx, [.t0 + edx]
+    32                              <1> 
+    33 000005AA 68[C8050000]525350- <1>         cdecl   draw_str, eax, ebx, edx, .s0
+    33 000005B2 E882FFFFFF6683C410  <1>
+    34                              <1> 
+    35 000005BB 41                  <1>         inc     ecx
+    36 000005BC EBCD                <1>         jmp     .10L
+    37                              <1> .10E:
+    38                              <1> 
+    39 000005BE 5F                  <1>         pop     edi
+    40 000005BF 5E                  <1>         pop     esi
+    41 000005C0 5A                  <1>         pop     edx
+    42 000005C1 59                  <1>         pop     ecx
+    43 000005C2 5B                  <1>         pop     ebx
+    44 000005C3 58                  <1>         pop     eax
+    45                              <1> 
+    46 000005C4 89EC                <1>         mov     esp, ebp
+    47 000005C6 5D                  <1>         pop     ebp
+    48                              <1> 
+    49 000005C7 C3                  <1>         ret
+    50                              <1> 
+    51 000005C8 202020202020202020- <1> .s0     db  '         ', 0
+    51 000005D1 00                  <1>
+    52                              <1> 
+    53 000005D2 00000008            <1> .t0     dw  0x0000, 0x0800
+    54 000005D6 00010009            <1> 		dw	0x0100, 0x0900
+    55 000005DA 0002000A            <1> 		dw	0x0200, 0x0A00
+    56 000005DE 0003000B            <1> 		dw	0x0300, 0x0B00
+    57 000005E2 0004000C            <1> 		dw	0x0400, 0x0C00
+    58 000005E6 0005000D            <1> 		dw	0x0500, 0x0D00
+    59 000005EA 0006000E            <1> 		dw	0x0600, 0x0E00
+    60 000005EE 0007000F            <1> 		dw	0x0700, 0x0F00
+    86                                  %include    "../modules/protect/draw_pixel.s"
+     1                              <1> draw_pixel:
+     2                              <1> 
+     3 000005F2 55                  <1>         push    ebp
+     4 000005F3 89E5                <1>         mov     ebp, esp
+     5                              <1> 
+     6 000005F5 50                  <1>         push    eax
+     7 000005F6 53                  <1>         push    ebx
+     8 000005F7 51                  <1>         push    ecx
+     9 000005F8 57                  <1>         push    edi
+    10                              <1> 
+    11 000005F9 8B7D0C              <1>         mov     edi, [ebp + 12]
+    12 000005FC C1E704              <1>         shl     edi, 4
+    13 000005FF 8DBCBF00000A00      <1>         lea     edi, [edi * 4 + edi + 0xA_0000]
+    14                              <1> 
+    15 00000606 8B5D08              <1>         mov     ebx, [ebp + 8]
+    16 00000609 89D9                <1>         mov     ecx, ebx
+    17 0000060B C1EB03              <1>         shr     ebx, 3
+    18 0000060E 01DF                <1>         add     edi, ebx
+    19                              <1> 
+    20 00000610 83E107              <1>         and     ecx, 0x07
+    21 00000613 BB80000000          <1>         mov     ebx, 0x80
+    22 00000618 D3EB                <1>         shr     ebx, cl
+    23                              <1> 
+    24 0000061A 8B4D10              <1>         mov     ecx, [ebp + 16]
+    25                              <1> 
+    26 0000061D 6A03E859FDFFFF6683- <1>         cdecl   vga_set_read_plane, 0x03
+    26 00000626 C404                <1>
+    27 00000628 6A08E867FDFFFF6683- <1>         cdecl   vga_set_write_plane, 0x08
+    27 00000631 C404                <1>
+    28 00000633 516A085753E8C5FDFF- <1>         cdecl   vram_bit_copy, ebx, edi, 0x08, ecx
+    28 0000063C FF6683C410          <1>
+    29                              <1> 
+    30 00000641 6A02E835FDFFFF6683- <1>         cdecl   vga_set_read_plane, 0x02
+    30 0000064A C404                <1>
+    31 0000064C 6A04E843FDFFFF6683- <1>         cdecl   vga_set_write_plane, 0x04
+    31 00000655 C404                <1>
+    32 00000657 516A045753E8A1FDFF- <1>         cdecl   vram_bit_copy, ebx, edi, 0x04, ecx
+    32 00000660 FF6683C410          <1>
+    33                              <1> 
+    34 00000665 6A01E811FDFFFF6683- <1>         cdecl   vga_set_read_plane, 0x01
+    34 0000066E C404                <1>
+    35 00000670 6A02E81FFDFFFF6683- <1>         cdecl   vga_set_write_plane, 0x02
+    35 00000679 C404                <1>
+    36 0000067B 516A025753E87DFDFF- <1>         cdecl   vram_bit_copy, ebx, edi, 0x02, ecx
+    36 00000684 FF6683C410          <1>
+    37                              <1> 
+    38 00000689 6A00E8EDFCFFFF6683- <1>         cdecl   vga_set_read_plane, 0x00
+    38 00000692 C404                <1>
+    39 00000694 6A01E8FBFCFFFF6683- <1>         cdecl   vga_set_write_plane, 0x01
+    39 0000069D C404                <1>
+    40 0000069F 516A015753E859FDFF- <1>         cdecl   vram_bit_copy, ebx, edi, 0x01, ecx
+    40 000006A8 FF6683C410          <1>
+    41                              <1> 
+    42 000006AD 5F                  <1>         pop     edi
+    43 000006AE 59                  <1>         pop     ecx
+    44 000006AF 5B                  <1>         pop     ebx
+    45 000006B0 58                  <1>         pop     eax
+    46                              <1> 
+    47 000006B1 89EC                <1>         mov     esp, ebp
+    48 000006B3 5D                  <1>         pop     ebp
+    49                              <1> 
+    50 000006B4 C3                  <1>         ret
+    87                                  %include    "../modules/protect/draw_line.s"
+     1                              <1> draw_line:
+     2                              <1> 
+     3 000006B5 55                  <1>         push    ebp
+     4 000006B6 89E5                <1>         mov     ebp, esp
+     5                              <1> 
+     6 000006B8 6A00                <1>         push    dword 0
+     7 000006BA 6A00                <1>         push    dword 0
+     8 000006BC 6A00                <1>         push    dword 0
+     9 000006BE 6A00                <1>         push    dword 0
+    10 000006C0 6A00                <1>         push    dword 0
+    11 000006C2 6A00                <1>         push    dword 0
+    12 000006C4 6A00                <1>         push    dword 0
+    13                              <1> 
+    14 000006C6 50                  <1>         push    eax
+    15 000006C7 53                  <1>         push    ebx
+    16 000006C8 51                  <1>         push    ecx
+    17 000006C9 52                  <1>         push    edx
+    18 000006CA 56                  <1>         push    esi
+    19 000006CB 57                  <1>         push    edi
+    20                              <1> 
+    21 000006CC 8B4508              <1>         mov     eax, [ebp + 8]
+    22 000006CF 8B5D10              <1>         mov     ebx, [ebp + 16]
+    23 000006D2 29C3                <1>         sub     ebx, eax
+    24 000006D4 7D09                <1>         jge     .10F
+    25                              <1> 
+    26 000006D6 F7DB                <1>         neg     ebx
+    27 000006D8 BEFFFFFFFF          <1>         mov     esi, -1
+    28 000006DD EB05                <1>         jmp     .10E
+    29                              <1> .10F:
+    30                              <1> 
+    31 000006DF BE01000000          <1>         mov     esi, 1
+    32                              <1> .10E:
+    33                              <1> 
+    34 000006E4 8B4D0C              <1>         mov     ecx, [ebp + 12]
+    35 000006E7 8B5514              <1>         mov     edx, [ebp + 20]
+    36 000006EA 29CA                <1>         sub     edx, ecx
+    37 000006EC 7D09                <1>         jge     .20F
+    38                              <1> 
+    39 000006EE F7DA                <1>         neg     edx
+    40 000006F0 BFFFFFFFFF          <1>         mov     edi, -1
+    41 000006F5 EB05                <1>         jmp     .20E
+    42                              <1> .20F:
+    43                              <1> 
+    44 000006F7 BF01000000          <1>         mov     edi, 1
+    45                              <1> .20E:
+    46                              <1> 
+    47 000006FC 8945F8              <1>         mov     [ebp - 8], eax
+    48 000006FF 895DF4              <1>         mov     [ebp - 12], ebx
+    49 00000702 8975F0              <1>         mov     [ebp - 16], esi
+    50                              <1> 
+    51 00000705 894DEC              <1>         mov     [ebp - 20], ecx
+    52 00000708 8955E8              <1>         mov     [ebp - 24], edx
+    53 0000070B 897DE4              <1>         mov     [ebp - 28], edi
+    54                              <1> 
+    55 0000070E 39D3                <1>         cmp     ebx, edx
+    56 00000710 7F08                <1>         jg      .22F
+    57                              <1> 
+    58 00000712 8D75EC              <1>         lea     esi, [ebp - 20]
+    59 00000715 8D7DF8              <1>         lea     edi, [ebp - 8]
+    60                              <1> 
+    61 00000718 EB06                <1>         jmp     .22E
+    62                              <1> .22F:
+    63                              <1> 
+    64 0000071A 8D75F8              <1>         lea     esi, [ebp - 8]
+    65 0000071D 8D7DEC              <1>         lea     edi, [ebp - 20]
+    66                              <1> .22E:
+    67                              <1> 
+    68 00000720 8B4EFC              <1>         mov     ecx, [esi - 4]
+    69 00000723 83F900              <1>         cmp     ecx, 0
+    70 00000726 7505                <1>         jnz     .30E
+    71 00000728 B901000000          <1>         mov     ecx, 1
+    72                              <1> .30E:
+    73                              <1> 
+    74                              <1> .50L:
+    75                              <1> 
+    76 0000072D FF7518FF75ECFF75F8- <1>         cdecl   draw_pixel, dword [ebp - 8], dword [ebp - 20], dword [ebp + 24]
+    76 00000736 E8B7FEFFFF6683C40C  <1>
+    77                              <1> 
+    78 0000073F 8B46F8              <1>         mov     eax, [esi - 8]
+    79 00000742 0106                <1>         add     [esi - 0], eax
+    80                              <1> 
+    81 00000744 8B45FC              <1>         mov     eax, [ebp - 4]
+    82 00000747 0347FC              <1>         add     eax, [edi - 4]
+    83 0000074A 8B5EFC              <1>         mov     ebx, [esi - 4]
+    84                              <1> 
+    85 0000074D 39D8                <1>         cmp     eax, ebx
+    86 0000074F 7C07                <1>         jl      .52E
+    87 00000751 29D8                <1>         sub     eax, ebx
+    88                              <1> 
+    89 00000753 8B5FF8              <1>         mov     ebx, [edi - 8]
+    90 00000756 011F                <1>         add     [edi - 0], ebx
+    91                              <1> .52E:
+    92                              <1> 
+    93 00000758 8945FC              <1>         mov     [ebp - 4], eax
+    94                              <1> 
+    95 0000075B E2D0                <1>         loop    .50L
+    96                              <1> .50E:
+    97                              <1> 
+    98 0000075D 5F                  <1>         pop     edi
+    99 0000075E 5E                  <1>         pop     esi
+   100 0000075F 5A                  <1>         pop     edx
+   101 00000760 59                  <1>         pop     ecx
+   102 00000761 5B                  <1>         pop     ebx
+   103 00000762 58                  <1>         pop     eax
+   104                              <1> 
+   105 00000763 89EC                <1>         mov     esp, ebp
+   106 00000765 5D                  <1>         pop     ebp
+   107                              <1> 
+   108 00000766 C3                  <1>         ret
+    88                                  %include    "../modules/protect/draw_rect.s"
+     1                              <1> draw_rect:
+     2                              <1> 
+     3 00000767 55                  <1>         push    ebp
+     4 00000768 89E5                <1>         mov     ebp, esp
+     5                              <1> 
+     6 0000076A 50                  <1>         push    eax
+     7 0000076B 53                  <1>         push    ebx
+     8 0000076C 51                  <1>         push    ecx
+     9 0000076D 52                  <1>         push    edx
+    10 0000076E 56                  <1>         push    esi
+    11                              <1> 
+    12 0000076F 8B4508              <1>         mov     eax, [ebp + 8]
+    13 00000772 8B5D0C              <1>         mov     ebx, [ebp + 12]
+    14 00000775 8B4D10              <1>         mov     ecx, [ebp + 16]
+    15 00000778 8B5514              <1>         mov     edx, [ebp + 20]
+    16 0000077B 8B7518              <1>         mov     esi, [ebp + 24]
+    17                              <1> 
+    18 0000077E 39C8                <1>         cmp     eax, ecx
+    19 00000780 7C01                <1>         jl      .10E
+    20 00000782 91                  <1>         xchg    eax, ecx
+    21                              <1> .10E:
+    22                              <1> 
+    23 00000783 39D3                <1>         cmp     ebx, edx
+    24 00000785 7C02                <1>         jl      .20E
+    25 00000787 87DA                <1>         xchg    ebx, edx
+    26                              <1> .20E:
+    27                              <1> 
+    28 00000789 5653515350E822FFFF- <1>         cdecl   draw_line, eax, ebx, ecx, ebx, esi
+    28 00000792 FF6683C414          <1>
+    29 00000797 5652505350E814FFFF- <1>         cdecl   draw_line, eax, ebx, eax, edx, esi
+    29 000007A0 FF6683C414          <1>
+    30                              <1> 
+    31 000007A5 4A                  <1>         dec     edx
+    32 000007A6 5652515250E805FFFF- <1>         cdecl   draw_line, eax, edx, ecx, edx, esi
+    32 000007AF FF6683C414          <1>
+    33 000007B4 42                  <1>         inc     edx
+    34                              <1> 
+    35 000007B5 4A                  <1>         dec     edx
+    36 000007B6 5652515351E8F5FEFF- <1>         cdecl   draw_line, ecx, ebx, ecx, edx, esi
+    36 000007BF FF6683C414          <1>
+    37                              <1> 
+    38 000007C4 5E                  <1>         pop     esi
+    39 000007C5 5A                  <1>         pop     edx
+    40 000007C6 59                  <1>         pop     ecx
+    41 000007C7 5B                  <1>         pop     ebx
+    42 000007C8 58                  <1>         pop     eax
+    43                              <1> 
+    44 000007C9 89EC                <1>         mov     esp, ebp
+    45 000007CB 5D                  <1>         pop     ebp
+    46                              <1> 
+    47 000007CC C3                  <1>         ret
+    89                                  %include    "../modules/protect/itoa.s"
+     1                              <1> itoa:
+     2                              <1> 
+     3 000007CD 55                  <1>         push    ebp
+     4 000007CE 89E5                <1>         mov     ebp, esp
+     5                              <1> 
+     6 000007D0 50                  <1>         push    eax
+     7 000007D1 53                  <1>         push    ebx
+     8 000007D2 51                  <1>         push    ecx
+     9 000007D3 52                  <1>         push    edx
+    10 000007D4 56                  <1>         push    esi
+    11 000007D5 57                  <1>         push    edi
+    12                              <1> 
+    13 000007D6 8B4508              <1>         mov     eax, [ebp + 8]
+    14 000007D9 8B750C              <1>         mov     esi, [ebp + 12]
+    15 000007DC 8B4D10              <1>         mov     ecx, [ebp + 16]
+    16                              <1> 
+    17 000007DF 89F7                <1>         mov     edi, esi
+    18 000007E1 01CF                <1>         add     edi, ecx
+    19 000007E3 4F                  <1>         dec     edi
+    20                              <1> 
+    21 000007E4 8B5D18              <1>         mov     ebx, [ebp + 24]
+    22                              <1> 
+    23 000007E7 F7C301000000        <1>         test    ebx, 0b0001
+    24 000007ED 7408                <1> .10Q:   je      .10E
+    25 000007EF 83F800              <1>         cmp     eax, 0
+    26 000007F2 7D03                <1> .12Q:   jge     .12E
+    27 000007F4 83CB02              <1>         or      ebx, 0b0010
+    28                              <1> .12E:
+    29                              <1> .10E:
+    30                              <1> 
+    31 000007F7 F7C302000000        <1>         test    ebx, 0b0010
+    32 000007FD 7410                <1> .20Q:   je      .20E
+    33 000007FF 83F800              <1>         cmp     eax, 0
+    34 00000802 7D07                <1> .22Q:   jge     .22F
+    35 00000804 F7D8                <1>         neg     eax
+    36 00000806 C6062D              <1>         mov     [esi], byte '-'
+    37 00000809 EB03                <1>         jmp     .22E
+    38                              <1> .22F:
+    39                              <1> 
+    40 0000080B C6062B              <1>         mov     [esi], byte '+'
+    41                              <1> .22E:
+    42 0000080E 49                  <1>         dec     ecx
+    43                              <1> .20E:
+    44                              <1> 
+    45 0000080F 8B5D14              <1>         mov     ebx, [ebp + 20]
+    46                              <1> .30L:
+    47                              <1> 
+    48 00000812 BA00000000          <1>         mov     edx, 0
+    49 00000817 F7F3                <1>         div     ebx
+    50                              <1> 
+    51 00000819 89D6                <1>         mov     esi, edx
+    52 0000081B 8A96[47080000]      <1>         mov     dl, byte [.ascii + esi]
+    53                              <1> 
+    54 00000821 8817                <1>         mov     [edi], dl
+    55 00000823 4F                  <1>         dec     edi
+    56                              <1> 
+    57 00000824 83F800              <1>         cmp     eax, 0
+    58 00000827 E0E9                <1>         loopnz  .30L
+    59                              <1> .30E:
+    60                              <1> 
+    61 00000829 83F900              <1>         cmp     ecx, 0
+    62 0000082C 740F                <1> .40Q:   je      .40E
+    63 0000082E B020                <1>         mov     al, ' '
+    64 00000830 6667837E1804        <1>         cmp     [bp + 24], word 0b0100
+    65 00000836 7502                <1> .42Q:   jne     .42E
+    66 00000838 B030                <1>         mov     al, '0'
+    67                              <1> .42E:
+    68 0000083A FD                  <1>         std
+    69 0000083B F3AA                <1>         rep stosb
+    70                              <1> .40E:
+    71                              <1> 
+    72 0000083D 5F                  <1>         pop     edi
+    73 0000083E 5E                  <1>         pop     esi
+    74 0000083F 5A                  <1>         pop     edx
+    75 00000840 59                  <1>         pop     ecx
+    76 00000841 5B                  <1>         pop     ebx
+    77 00000842 58                  <1>         pop     eax
+    78                              <1> 
+    79 00000843 89EC                <1>         mov     esp, ebp
+    80 00000845 5D                  <1>         pop     ebp
+    81                              <1> 
+    82 00000846 C3                  <1>         ret
+    83                              <1> 
+    84 00000847 303132333435363738- <1> .ascii  db      "0123456789ABCDEF"
+    84 00000850 39414243444546      <1>
+    90                                  %include    "../modules/protect/rtc.s"
+     1                              <1> rtc_get_time:
+     2                              <1> 
+     3 00000857 55                  <1>         push    ebp
+     4 00000858 89E5                <1>         mov     ebp, esp
+     5                              <1> 
+     6 0000085A 53                  <1>         push    ebx
+     7                              <1> 
+     8 0000085B B00A                <1>         mov     al, 0x0A
+     9 0000085D E670                <1>         out     0x70, al
+    10 0000085F E471                <1>         in      al, 0x71
+    11 00000861 A880                <1>         test    al, 0x80
+    12 00000863 7407                <1>         je      .10F
+    13 00000865 B801000000          <1>         mov     eax, 1
+    14 0000086A EB27                <1>         jmp     .10E
+    15                              <1> .10F:
+    16                              <1> 
+    17 0000086C B004                <1>         mov     al, 0x04
+    18 0000086E E670                <1>         out     0x70, al
+    19 00000870 E471                <1>         in      al, 0x71
+    20                              <1> 
+    21 00000872 C1E008              <1>         shl     eax, 8
+    22                              <1> 
+    23 00000875 B002                <1>         mov     al, 0x02
+    24 00000877 E670                <1>         out     0x70, al
+    25 00000879 E471                <1>         in      al, 0x71
+    26                              <1> 
+    27 0000087B C1E008              <1>         shl     eax, 8
+    28                              <1> 
+    29 0000087E B000                <1>         mov     al, 0x00
+    30 00000880 E670                <1>         out     0x70, al
+    31 00000882 E471                <1>         in      al, 0x71
+    32                              <1> 
+    33 00000884 25FFFFFF00          <1>         and     eax, 0x00_FF_FF_FF
+    34                              <1> 
+    35 00000889 8B5D08              <1>         mov     ebx, [ebp + 8]
+    36 0000088C 8903                <1>         mov     [ebx], eax
+    37                              <1> 
+    38 0000088E B800000000          <1>         mov     eax, 0
+    39                              <1> .10E:
+    40                              <1> 
+    41 00000893 5B                  <1>         pop     ebx
+    42                              <1> 
+    43 00000894 89EC                <1>         mov     esp, ebp
+    44 00000896 5D                  <1>         pop     ebp
+    45                              <1> 
+    46 00000897 C3                  <1>         ret
+    91                                  %include    "../modules/protect/draw_time.s"
+     1                              <1> draw_time:
+     2                              <1> 
+     3 00000898 55                  <1>         push    ebp
+     4 00000899 89E5                <1>         mov     ebp, esp
+     5                              <1> 
+     6 0000089B 50                  <1>         push    eax
+     7 0000089C 53                  <1>         push    ebx
+     8                              <1> 
+     9 0000089D 8B4514              <1>         mov     eax, [ebp + 20]
+    10 000008A0 3B05[1E090000]      <1>         cmp     eax, [.last]
+    11 000008A6 7468                <1>         je      .10E
+    12                              <1> 
+    13 000008A8 A3[1E090000]        <1>         mov     [.last], eax
+    14                              <1> 
+    15 000008AD BB00000000          <1>         mov     ebx, 0
+    16 000008B2 0FB6D8              <1>         movzx   ebx, al
+    17 000008B5 6A046A106A0268-     <1>         cdecl   itoa, ebx, .sec, 2, 16, 0b0100
+    17 000008BC [2C090000]53E807FF- <1>
+    17 000008C4 FFFF6683C414        <1>
+    18                              <1> 
+    19 000008CA 88E3                <1>         mov     bl, ah
+    20 000008CC 6A046A106A0268-     <1>         cdecl   itoa, ebx, .min, 2, 16, 0b0100
+    20 000008D3 [29090000]53E8F0FE- <1>
+    20 000008DB FFFF6683C414        <1>
+    21                              <1> 
+    22 000008E1 C1E810              <1>         shr     eax, 16
+    23 000008E4 6A046A106A0268-     <1>         cdecl   itoa, eax, .hour, 2, 16, 0b0100
+    23 000008EB [26090000]50E8D8FE- <1>
+    23 000008F3 FFFF6683C414        <1>
+    24                              <1> 
+    25 000008F9 68[26090000]FF7510- <1>         cdecl   draw_str, dword [ebp + 8], dword [ebp + 12], dword [ebp + 16], .hour
+    25 00000901 FF750CFF7508E82DFC- <1>
+    25 0000090A FFFF6683C410        <1>
+    26                              <1> 
+    27                              <1> .10E:
+    28                              <1> 
+    29 00000910 5B                  <1>         pop     ebx
+    30 00000911 58                  <1>         pop     eax
+    31                              <1> 
+    32 00000912 89EC                <1>         mov     esp, ebp
+    33 00000914 5D                  <1>         pop     ebp
+    34                              <1> 
+    35 00000915 C3                  <1>         ret
+    36                              <1> 
+    37                              <1> ALIGN 2, db 0
+    38 00000916 0000000000000000    <1> .temp   dq  0
+    39 0000091E 0000000000000000    <1> .last   dq  0
+    40 00000926 5A5A3A              <1> .hour   db  "ZZ:"
+    41 00000929 5A5A3A              <1> .min    db  "ZZ:"
+    42 0000092C 5A5A00              <1> .sec    db  "ZZ", 0
+    92                                  %include    "../modules/protect/interrupt.s"
+     1 0000092F 90                  <1> ALIGN 4
+     2 00000930 FF07                <1> IDTR:   dw      8 * 256 -1
+     3 00000932 00001000            <1>         dd      VECT_BASE
+     4                              <1> 
+     5                              <1> init_int:
+     6                              <1> 
+     7 00000936 50                  <1>         push    eax
+     8 00000937 53                  <1>         push    ebx
+     9 00000938 51                  <1>         push    ecx
+    10 00000939 57                  <1>         push    edi
+    11                              <1> 
+    12 0000093A 8D05[800A0000]      <1>         lea     eax, [int_default]
+    13 00000940 BB008E0800          <1>         mov     ebx, 0x0008_8E00
+    14 00000945 6693                <1>         xchg    ax, bx
+    15                              <1> 
+    16 00000947 B900010000          <1>         mov     ecx, 256
+    17 0000094C BF00001000          <1>         mov     edi, VECT_BASE
+    18                              <1> 
+    19                              <1> .10L:
+    20                              <1> 
+    21 00000951 891F                <1>         mov     [edi + 0], ebx
+    22 00000953 894704              <1>         mov     [edi + 4], eax
+    23 00000956 83C708              <1>         add     edi, 8
+    24 00000959 E2F6                <1>         loop    .10L
+    25                              <1> 
+    26 0000095B 0F011D[30090000]    <1>         lidt    [IDTR]
+    27                              <1> 
+    28 00000962 5F                  <1>         pop     edi
+    29 00000963 59                  <1>         pop     ecx
+    30 00000964 5B                  <1>         pop     ebx
+    31 00000965 58                  <1>         pop     eax
+    32                              <1> 
+    33 00000966 C3                  <1>         ret
+    34                              <1> 
+    35                              <1> 
+    36                              <1> int_stop:
+    37                              <1> 
+    38 00000967 FB                  <1>         sti
+    39                              <1> 
+    40 00000968 50680F0600006A0F6A- <1>         cdecl   draw_str, 25, 15, 0x060F, eax
+    40 00000971 19E8C2FBFFFF6683C4- <1>
+    40 0000097A 10                  <1>
+    41                              <1> 
+    42 0000097B 8B0424              <1>         mov     eax, [esp + 0]
+    43 0000097E 6A046A106A0868-     <1>         cdecl   itoa, eax, .p1, 8, 16, 0b0100
+    43 00000985 [430A0000]50E83EFE- <1>
+    43 0000098D FFFF6683C414        <1>
+    44                              <1> 
+    45 00000993 8B442404            <1>         mov     eax, [esp + 4]
+    46 00000997 6A046A106A0868-     <1>         cdecl   itoa, eax, .p2, 8, 16, 0b0100
+    46 0000099E [540A0000]50E825FE- <1>
+    46 000009A6 FFFF6683C414        <1>
+    47                              <1> 
+    48 000009AC 8B442408            <1>         mov     eax, [esp + 8]
+    49 000009B0 6A046A106A0868-     <1>         cdecl   itoa, eax, .p3, 8, 16, 0b0100
+    49 000009B7 [650A0000]50E80CFE- <1>
+    49 000009BF FFFF6683C414        <1>
+    50                              <1> 
+    51 000009C5 8B44240C            <1>         mov     eax, [esp + 12]
+    52 000009C9 6A046A106A0868-     <1>         cdecl   itoa, eax, .p4, 8, 16, 0b0100
+    52 000009D0 [760A0000]50E8F3FD- <1>
+    52 000009D8 FFFF6683C414        <1>
+    53                              <1> 
+    54 000009DE 68[3C0A0000]68040F- <1>         cdecl   draw_str, 25, 16, 0x0F04, .s1
+    54 000009E6 00006A106A19E848FB- <1>
+    54 000009EF FFFF6683C410        <1>
+    55 000009F5 68[4D0A0000]68040F- <1>         cdecl   draw_str, 25, 17, 0x0F04, .s2
+    55 000009FD 00006A116A19E831FB- <1>
+    55 00000A06 FFFF6683C410        <1>
+    56 00000A0C 68[5E0A0000]68040F- <1>         cdecl   draw_str, 25, 18, 0x0F04, .s3
+    56 00000A14 00006A126A19E81AFB- <1>
+    56 00000A1D FFFF6683C410        <1>
+    57 00000A23 68[6F0A0000]68040F- <1>         cdecl   draw_str, 25, 19, 0x0F04, .s4
+    57 00000A2B 00006A136A19E803FB- <1>
+    57 00000A34 FFFF6683C410        <1>
+    58                              <1> 
+    59 00000A3A EBFE                <1>         jmp     $
+    60                              <1> 
+    61 00000A3C 4553502B20303A      <1> .s1		db	"ESP+ 0:"
+    62 00000A43 5F5F5F5F5F5F5F5F20- <1> .p1		db	"________ ", 0
+    62 00000A4C 00                  <1>
+    63 00000A4D 2020202B20343A      <1> .s2		db	"   + 4:"
+    64 00000A54 5F5F5F5F5F5F5F5F20- <1> .p2		db	"________ ", 0
+    64 00000A5D 00                  <1>
+    65 00000A5E 2020202B20383A      <1> .s3		db	"   + 8:"
+    66 00000A65 5F5F5F5F5F5F5F5F20- <1> .p3		db	"________ ", 0
+    66 00000A6E 00                  <1>
+    67 00000A6F 2020202B31323A      <1> .s4		db	"   +12:"
+    68 00000A76 5F5F5F5F5F5F5F5F20- <1> .p4		db	"________ ", 0
+    68 00000A7F 00                  <1>
+    69                              <1> 
+    70                              <1> 
+    71                              <1> int_default:
+    72                              <1> 
+    73 00000A80 9C                  <1>         pushf
+    74 00000A81 0E                  <1>         push    cs
+    75 00000A82 68[67090000]        <1>         push    int_stop
+    76                              <1> 
+    77 00000A87 B8[8D0A0000]        <1>         mov     eax, .s0
+    78 00000A8C CF                  <1>         iret
+    79                              <1> 
+    80 00000A8D 203C2020202053544F- <1> .s0     db  " <    STOP    > ", 0
+    80 00000A96 50202020203E2000    <1>
+    81                              <1> 
+    82                              <1> 
+    83                              <1> int_zero_div:
+    84                              <1> 
+    85 00000A9E 9C                  <1>         pushf
+    86 00000A9F 0E                  <1>         push    cs
+    87 00000AA0 68[67090000]        <1>         push    int_stop
+    88                              <1> 
+    89 00000AA5 B8[AB0A0000]        <1>         mov     eax, .s0
+    90 00000AAA CF                  <1>         iret
+    91                              <1> 
+    92 00000AAB 203C20205A45524F20- <1> .s0     db  " <  ZERO DIV  > ", 0
+    92 00000AB4 44495620203E2000    <1>
+    93                                  %include    "../modules/protect/pic.s"
+     1                              <1> init_pic:
+     2                              <1> 
+     3 00000ABC 50                  <1>         push    eax
+     4                              <1> 
+     5                              <1>         outp    0x20, 0x11
+     5 00000ABD B011                <2>  mov al, %2
+     5 00000ABF E620                <2>  out %1, al
+     6                              <1>         outp    0x21, 0x20
+     6 00000AC1 B020                <2>  mov al, %2
+     6 00000AC3 E621                <2>  out %1, al
+     7                              <1>         outp    0x21, 0x04
+     7 00000AC5 B004                <2>  mov al, %2
+     7 00000AC7 E621                <2>  out %1, al
+     8                              <1>         outp    0x21, 0x05
+     8 00000AC9 B005                <2>  mov al, %2
+     8 00000ACB E621                <2>  out %1, al
+     9                              <1>         outp    0x21, 0xFF
+     9 00000ACD B0FF                <2>  mov al, %2
+     9 00000ACF E621                <2>  out %1, al
+    10                              <1> 
+    11                              <1>         outp    0xA0, 0x11
+    11 00000AD1 B011                <2>  mov al, %2
+    11 00000AD3 E6A0                <2>  out %1, al
+    12                              <1>         outp    0xA1, 0x28
+    12 00000AD5 B028                <2>  mov al, %2
+    12 00000AD7 E6A1                <2>  out %1, al
+    13                              <1>         outp    0xA1, 0x02
+    13 00000AD9 B002                <2>  mov al, %2
+    13 00000ADB E6A1                <2>  out %1, al
+    14                              <1>         outp    0xA1, 0x01
+    14 00000ADD B001                <2>  mov al, %2
+    14 00000ADF E6A1                <2>  out %1, al
+    15                              <1>         outp    0xA1, 0xFF
+    15 00000AE1 B0FF                <2>  mov al, %2
+    15 00000AE3 E6A1                <2>  out %1, al
+    16                              <1> 
+    17 00000AE5 58                  <1>         pop     eax
+    18                              <1> 
+    19 00000AE6 C3                  <1>         ret
+    94                                  %include    "../modules/protect/int_rtc.s"
+     1                              <1> rtc_int_en:
+     2                              <1> 
+     3 00000AE7 55                  <1>         push    ebp
+     4 00000AE8 89E5                <1>         mov     ebp, esp
+     5                              <1> 
+     6 00000AEA 50                  <1>         push    eax
+     7                              <1> 
+     8                              <1>         outp    0x70, 0x0B
+     8 00000AEB B00B                <2>  mov al, %2
+     8 00000AED E670                <2>  out %1, al
+     9                              <1> 
+    10 00000AEF E471                <1>         in      al, 0x71
+    11 00000AF1 0A4508              <1>         or      al, [ebp + 8]
+    12                              <1> 
+    13 00000AF4 E671                <1>         out     0x71, al
+    14                              <1> 
+    15 00000AF6 58                  <1>         pop     eax
+    16                              <1> 
+    17 00000AF7 89EC                <1>         mov     esp, ebp
+    18 00000AF9 5D                  <1>         pop     ebp
+    19                              <1> 
+    20 00000AFA C3                  <1>         ret
+    21                              <1> 
+    22                              <1> 
+    23                              <1> int_rtc:
+    24                              <1> 
+    25 00000AFB 60                  <1>         pusha
+    26 00000AFC 1E                  <1>         push    ds
+    27 00000AFD 06                  <1>         push    es
+    28                              <1> 
+    29 00000AFE 66B81000            <1>         mov     ax, 0x0010
+    30 00000B02 8ED8                <1>         mov     ds, ax
+    31 00000B04 8EC0                <1>         mov     es, ax
+    32                              <1> 
+    33 00000B06 68[D4010000]E847FD- <1>         cdecl   rtc_get_time, RTC_TIME
+    33 00000B0E FFFF6683C404        <1>
+    34                              <1> 
+    35                              <1>         outp    0x70, 0x0C
+    35 00000B14 B00C                <2>  mov al, %2
+    35 00000B16 E670                <2>  out %1, al
+    36 00000B18 E471                <1>         in      al, 0x71
+    37                              <1> 
+    38                              <1>         outp    0xA0, 0x20
+    38 00000B1A B020                <2>  mov al, %2
+    38 00000B1C E6A0                <2>  out %1, al
+    39                              <1>         outp    0x20, 0x20
+    39 00000B1E B020                <2>  mov al, %2
+    39 00000B20 E620                <2>  out %1, al
+    40                              <1> 
+    41 00000B22 07                  <1>         pop     es
+    42 00000B23 1F                  <1>         pop     ds
+    43 00000B24 61                  <1>         popa
+    44                              <1> 
+    45 00000B25 CF                  <1>         iret
+    95                                  %include    "../modules/protect/int_keyboard.s"
+     1                              <1> int_keyboard:
+     2                              <1> 
+     3 00000B26 60                  <1>         pusha
+     4 00000B27 1E                  <1>         push    ds
+     5 00000B28 06                  <1>         push    es
+     6                              <1> 
+     7 00000B29 66B81000            <1>         mov     ax, 0x0010
+     8 00000B2D 8ED8                <1>         mov     ds, ax
+     9 00000B2F 8EC0                <1>         mov     es, ax
+    10                              <1> 
+    11 00000B31 E460                <1>         in      al, 0x60
+    12                              <1> 
+    13 00000B33 5068[4C0B0000]E856- <1>         cdecl   ring_wr, _KEY_BUFF, eax
+    13 00000B3B 0000006683C408      <1>
+    14                              <1> 
+    15                              <1>         outp    0x20, 0x20
+    15 00000B42 B020                <2>  mov al, %2
+    15 00000B44 E620                <2>  out %1, al
+    16                              <1> 
+    17 00000B46 07                  <1>         pop     es
+    18 00000B47 1F                  <1>         pop     ds
+    19 00000B48 61                  <1>         popa
+    20                              <1> 
+    21 00000B49 CF                  <1>         iret
+    22                              <1> 
+    23 00000B4A 00<rept>            <1> ALIGN 4, db 0
+    24 00000B4C 00<rept>            <1> _KEY_BUFF:  times ring_buff_size db 0
+    96                                  %include    "../modules/protect/ring_buff.s"
+     1                              <1> ring_rd:
+     2                              <1> 
+     3 00000B64 55                  <1>         push    ebp
+     4 00000B65 89E5                <1>         mov     ebp, esp
+     5                              <1> 
+     6 00000B67 53                  <1>         push    ebx
+     7 00000B68 56                  <1>         push    esi
+     8 00000B69 57                  <1>         push    edi
+     9                              <1> 
+    10 00000B6A 8B7508              <1>         mov     esi, [ebp + 8]
+    11 00000B6D 8B7D0C              <1>         mov     edi, [ebp + 12]
+    12                              <1> 
+    13 00000B70 B800000000          <1>         mov     eax, 0
+    14 00000B75 8B1E                <1>         mov     ebx, [esi + ring_buff.rp]
+    15 00000B77 3B5E04              <1>         cmp     ebx, [esi + ring_buff.wp]
+    16 00000B7A 7411                <1>         je      .10E
+    17                              <1> 
+    18 00000B7C 8A441E08            <1>         mov     al, [esi + ring_buff.item + ebx]
+    19                              <1> 
+    20 00000B80 8807                <1>         mov     [edi], al
+    21                              <1> 
+    22 00000B82 43                  <1>         inc     ebx
+    23 00000B83 83E30F              <1>         and     ebx, RING_INDEX_MASK
+    24 00000B86 891E                <1>         mov     [esi + ring_buff.rp], ebx
+    25                              <1> 
+    26 00000B88 B801000000          <1>         mov     eax, 1
+    27                              <1> .10E:
+    28                              <1> 
+    29 00000B8D 5F                  <1>         pop     edi
+    30 00000B8E 5E                  <1>         pop     esi
+    31 00000B8F 5B                  <1>         pop     ebx
+    32                              <1> 
+    33 00000B90 89EC                <1>         mov     esp, ebp
+    34 00000B92 5D                  <1>         pop     ebp
+    35                              <1> 
+    36 00000B93 C3                  <1>         ret
+    37                              <1> 
+    38                              <1> 
+    39                              <1> ring_wr:
+    40                              <1> 
+    41 00000B94 55                  <1>         push    ebp
+    42 00000B95 89E5                <1>         mov     ebp, esp
+    43                              <1> 
+    44 00000B97 53                  <1>         push    ebx
+    45 00000B98 51                  <1>         push    ecx
+    46 00000B99 56                  <1>         push    esi
+    47                              <1> 
+    48 00000B9A 8B7508              <1>         mov     esi, [ebp + 8]
+    49                              <1> 
+    50 00000B9D B800000000          <1>         mov     eax, 0
+    51 00000BA2 8B5E04              <1>         mov     ebx, [esi + ring_buff.wp]
+    52 00000BA5 89D9                <1>         mov     ecx, ebx
+    53 00000BA7 41                  <1>         inc     ecx
+    54 00000BA8 83E10F              <1>         and     ecx, RING_INDEX_MASK
+    55                              <1> 
+    56 00000BAB 3B0E                <1>         cmp     ecx, [esi + ring_buff.rp]
+    57 00000BAD 740F                <1>         je      .10E
+    58                              <1> 
+    59 00000BAF 8A450C              <1>         mov     al, [ebp + 12]
+    60                              <1> 
+    61 00000BB2 88441E08            <1>         mov     [esi + ring_buff.item + ebx], al
+    62 00000BB6 894E04              <1>         mov     [esi + ring_buff.wp], ecx
+    63 00000BB9 B801000000          <1>         mov     eax, 1
+    64                              <1> .10E:
+    65                              <1> 
+    66 00000BBE 5E                  <1>         pop     esi
+    67 00000BBF 59                  <1>         pop     ecx
+    68 00000BC0 5B                  <1>         pop     ebx
+    69                              <1> 
+    70 00000BC1 89EC                <1>         mov     esp, ebp
+    71 00000BC3 5D                  <1>         pop     ebp
+    72                              <1> 
+    73 00000BC4 C3                  <1>         ret
+    74                              <1> 
+    75                              <1> 
+    76                              <1> draw_key:
+    77                              <1> 
+    78 00000BC5 55                  <1>         push    ebp
+    79 00000BC6 89E5                <1>         mov     ebp, esp
+    80                              <1> 
+    81 00000BC8 60                  <1>         pusha
+    82                              <1> 
+    83 00000BC9 8B5508              <1>         mov     edx, [ebp + 8]
+    84 00000BCC 8B7D0C              <1>         mov     edi, [ebp + 12]
+    85 00000BCF 8B7510              <1>         mov     esi, [ebp + 16]
+    86                              <1> 
+    87 00000BD2 8B1E                <1>         mov     ebx, [esi + ring_buff.rp]
+    88 00000BD4 8D7608              <1>         lea     esi, [esi + ring_buff.item]
+    89 00000BD7 B910000000          <1>         mov     ecx, RING_ITEM_SIZE
+    90                              <1> 
+    91                              <1> .10L:
+    92                              <1> 
+    93 00000BDC 4B                  <1>         dec     ebx
+    94 00000BDD 83E30F              <1>         and     ebx, RING_INDEX_MASK
+    95 00000BE0 8A041E              <1>         mov     al, [esi + ebx]
+    96                              <1> 
+    97 00000BE3 6A046A106A0268-     <1>         cdecl   itoa, eax, .tmp, 2, 16, 0b0100
+    97 00000BEA [140C0000]50E8D9FB- <1>
+    97 00000BF2 FFFF6683C414        <1>
+    98 00000BF8 68[140C0000]6A0257- <1>         cdecl   draw_str, edx, edi, 0x02, .tmp
+    98 00000C00 52E833F9FFFF6683C4- <1>
+    98 00000C09 10                  <1>
+    99                              <1> 
+   100 00000C0A 83C203              <1>         add     edx, 3
+   101                              <1> 
+   102 00000C0D E2CD                <1>         loop    .10L
+   103                              <1> .10E:
+   104                              <1> 
+   105 00000C0F 61                  <1>         popa
+   106                              <1> 
+   107 00000C10 89EC                <1>         mov     esp, ebp
+   108 00000C12 5D                  <1>         pop     ebp
+   109                              <1> 
+   110 00000C13 C3                  <1>         ret
+   111                              <1> 
+   112 00000C14 2D2D2000            <1> .tmp    db "-- ", 0
+    97                                  %include    "../modules/protect/timer.s"
+     1                              <1> int_en_timer0:
+     2                              <1> 
+     3 00000C18 50                  <1>         push    eax
+     4                              <1> 
+     5                              <1>         outp    0x43, 0b_00_11_010_0
+     5 00000C19 B034                <2>  mov al, %2
+     5 00000C1B E643                <2>  out %1, al
+     6                              <1>         outp    0x40, 0x9C
+     6 00000C1D B09C                <2>  mov al, %2
+     6 00000C1F E640                <2>  out %1, al
+     7                              <1>         outp    0x40, 0x2E
+     7 00000C21 B02E                <2>  mov al, %2
+     7 00000C23 E640                <2>  out %1, al
+     8                              <1> 
+     9 00000C25 58                  <1>         pop     eax
+    10                              <1> 
+    11 00000C26 C3                  <1>         ret
+    98                                  %include    "../modules/protect/draw_rotation_bar.s"
+     1                              <1> draw_rotation_bar:
+     2                              <1> 
+     3 00000C27 50                  <1>         push    eax
+     4                              <1> 
+     5 00000C28 A1[44030000]        <1>         mov     eax, [TIMER_COUNT]
+     6 00000C2D C1E804              <1>         shr     eax, 4
+     7 00000C30 3B05[580C0000]      <1>         cmp     eax, [.index]
+     8 00000C36 741E                <1>         je      .10E
+     9                              <1> 
+    10 00000C38 A3[580C0000]        <1>         mov     [.index], eax
+    11 00000C3D 83E003              <1>         and     eax, 0x03
+    12                              <1> 
+    13 00000C40 8A80[5C0C0000]      <1>         mov     al, [.table + eax]
+    14 00000C46 506A0F6A1D6A00E8DE- <1>         cdecl   draw_char, 0, 29, 0x000F, eax
+    14 00000C4F F7FFFF6683C410      <1>
+    15                              <1> 
+    16                              <1> .10E:
+    17                              <1> 
+    18 00000C56 58                  <1>         pop     eax
+    19                              <1> 
+    20 00000C57 C3                  <1>         ret
+    21                              <1> 
+    22                              <1> ALIGN 4, db 0
+    23 00000C58 00000000            <1> .index      dd 0
+    24 00000C5C 7C2F2D5C            <1> .table      db "|/-\"
+    99                                  %include    "../modules/protect/call_gate.s"
+     1                              <1> call_gate:
+     2                              <1> 
+     3 00000C60 55                  <1>         push    ebp
+     4 00000C61 89E5                <1>         mov     ebp, esp
+     5                              <1> 
+     6 00000C63 60                  <1>         pusha
+     7 00000C64 1E                  <1>         push    ds
+     8 00000C65 06                  <1>         push    es
+     9                              <1> 
+    10 00000C66 66B81000            <1>         mov     ax, 0x0010
+    11 00000C6A 8ED8                <1>         mov     ds, ax
+    12 00000C6C 8EC0                <1>         mov     es, ax
+    13                              <1> 
+    14 00000C6E 8B450C              <1>         mov     eax, dword [ebp + 12]
+    15 00000C71 8B5D10              <1>         mov     ebx, dword [ebp + 16]
+    16 00000C74 8B4D14              <1>         mov     ecx, dword [ebp + 20]
+    17 00000C77 8B5518              <1>         mov     edx, dword [ebp + 24]
+    18 00000C7A 52515350E8B6F8FFFF- <1>         cdecl   draw_str, eax, ebx, ecx, edx
+    18 00000C83 6683C410            <1>
+    19                              <1> 
+    20 00000C87 07                  <1>         pop     es
+    21 00000C88 1F                  <1>         pop     ds
+    22 00000C89 61                  <1>         popa
+    23                              <1> 
+    24 00000C8A 89EC                <1>         mov     esp, ebp
+    25 00000C8C 5D                  <1>         pop     ebp
+    26                              <1> 
+    27 00000C8D CA1000              <1>         retf    4 * 4
+   100                                  %include    "../modules/protect/trap_gate.s"
+     1                              <1> trap_gate_81:
+     2                              <1> 
+     3 00000C90 50535251E897F7FFFF- <1>         cdecl   draw_char, ecx, edx, ebx, eax
+     3 00000C99 6683C410            <1>
+     4                              <1> 
+     5 00000C9D CF                  <1>         iret
+     6                              <1> 
+     7                              <1> 
+     8                              <1> trap_gate_82:
+     9                              <1> 
+    10 00000C9E 535251E84CF9FFFF66- <1>         cdecl   draw_pixel, ecx, edx, ebx
+    10 00000CA7 83C40C              <1>
+    11                              <1> 
+    12 00000CAA CF                  <1>         iret
+   101                                  
+   102 00000CAB 00<rept>                        times KERNEL_SIZE -($ - $$) db 0x00
