@@ -1,0 +1,1097 @@
+     1                                  %include    "../include/define.s"
+     1                              <1>         BOOT_LOAD           equ     0x7C00
+     2                              <1> 
+     3                              <1>         BOOT_SIZE           equ     (1024 * 8)
+     4                              <1>         SECT_SIZE           equ     (512)
+     5                              <1>         BOOT_SECT           equ     (BOOT_SIZE / SECT_SIZE)
+     6                              <1>         BOOT_END            equ     (BOOT_LOAD + BOOT_SIZE)
+     7                              <1> 
+     8                              <1>         E820_RECORD_SIZE    equ     20
+     9                              <1> 
+    10                              <1>         KERNEL_LOAD         equ     0x0010_1000
+    11                              <1> 
+    12                              <1>         KERNEL_SIZE         equ     (1024 * 8)
+    13                              <1>         KERNEL_SECT         equ     (KERNEL_SIZE / SECT_SIZE)
+    14                              <1> 
+    15                              <1>         VECT_BASE           equ     0x0010_0000
+    16                              <1> 
+    17                              <1> 
+    18                              <1>         STACK_BASE          equ     0x0010_3000
+    19                              <1>         STACK_SIZE          equ     1024
+    20                              <1> 
+    21                              <1>         SP_TASK_0           equ     STACK_BASE + (STACK_SIZE * 1)
+    22                              <1>         SP_TASK_1           equ     STACK_BASE + (STACK_SIZE * 2)
+     2                                  %include    "../include/macro.s"
+     1                              <1> %macro  cdecl 1-*.nolist
+     2                              <1> 
+     3                              <1>     %rep  %0 -1
+     4                              <1>         push    %{-1:-1}
+     5                              <1>         %rotate -1
+     6                              <1>     %endrep
+     7                              <1>     %rotate -1
+     8                              <1> 
+     9                              <1>         call    %1
+    10                              <1> 
+    11                              <1>     %if  1 < %0
+    12                              <1>         add     sp, (__BITS__ >> 3) * (%0 - 1)
+    13                              <1>     %endif
+    14                              <1> 
+    15                              <1> %endmacro
+    16                              <1> 
+    17                              <1> %macro  set_vect 1-*.nolist
+    18                              <1> 		push	eax
+    19                              <1> 		push	edi
+    20                              <1> 
+    21                              <1> 		mov		edi, VECT_BASE + (%1 * 8)
+    22                              <1> 		mov		eax, %2
+    23                              <1> 
+    24                              <1> 	%if 3 == %0
+    25                              <1> 		mov		[edi + 4], %3
+    26                              <1> 	%endif
+    27                              <1> 
+    28                              <1>         mov		[edi + 0], ax
+    29                              <1> 		shr		eax, 16 
+    30                              <1> 		mov		[edi + 6], ax
+    31                              <1> 
+    32                              <1> 		pop		edi
+    33                              <1> 		pop		eax
+    34                              <1> %endmacro
+    35                              <1> 
+    36                              <1> %macro  outp 2
+    37                              <1>         mov     al, %2
+    38                              <1>         out     %1, al
+    39                              <1> %endmacro
+    40                              <1> 
+    41                              <1> %macro  set_desc 2-*
+    42                              <1>         push    eax
+    43                              <1>         push    edi
+    44                              <1> 
+    45                              <1>         mov     edi, %1
+    46                              <1>         mov     eax, %2
+    47                              <1> 
+    48                              <1>     %if 3 == %0
+    49                              <1>         mov     [edi + 0], %3
+    50                              <1>     %endif
+    51                              <1> 
+    52                              <1>         mov     [edi + 2], ax
+    53                              <1>         shr     eax, 16
+    54                              <1>         mov     [edi + 4], al
+    55                              <1>         mov     [edi + 7], ah
+    56                              <1> 
+    57                              <1>         pop     edi
+    58                              <1>         pop     eax
+    59                              <1> %endmacro
+    60                              <1> 
+    61                              <1> struc drive
+    62 00000000 <res 00000002>      <1>         .no     resw    1
+    63 00000002 <res 00000002>      <1>         .cyln   resw    1
+    64 00000004 <res 00000002>      <1>         .head   resw    1
+    65 00000006 <res 00000002>      <1>         .sect   resw    1
+    66                              <1> endstruc
+    67                              <1> 
+    68                              <1> %define		RING_ITEM_SIZE		(1 << 4)
+    69                              <1> %define		RING_INDEX_MASK		(RING_ITEM_SIZE - 1)
+    70                              <1> 
+    71                              <1> struc ring_buff
+    72 00000000 <res 00000004>      <1>         .rp     resd    1
+    73 00000004 <res 00000004>      <1>         .wp     resd    1
+    74 00000008 <res 00000010>      <1>         .item   resb    RING_ITEM_SIZE
+    75                              <1> endstruc
+     3                                  
+     4                                          ORG     BOOT_LOAD
+     5                                  
+     6                                  entry:
+     7                                  
+     8 00000000 EB58                            jmp     ipl
+     9 00000002 90<rept>                        times   90 - ($ - $$) db 0x90
+    10                                  
+    11                                  ipl:
+    12 0000005A FA                              cli
+    13                                      
+    14 0000005B B80000                          mov     ax, 0x0000
+    15 0000005E 8ED8                            mov     ds, ax
+    16 00000060 8EC0                            mov     es, ax
+    17 00000062 8ED0                            mov     ss, ax
+    18 00000064 BC007C                          mov     sp, BOOT_LOAD
+    19                                  
+    20 00000067 FB                              sti
+    21                                  
+    22 00000068 8816[BA00]                      mov     [BOOT + drive.no], dl
+    23                                  
+    24 0000006C 68[9900]E8500083C4-             cdecl   puts, .s0
+    24 00000074 02                 
+    25                                  
+    26 00000075 BB0F00                          mov     bx, BOOT_SECT - 1
+    27 00000078 B9007E                          mov     cx, BOOT_LOAD + SECT_SIZE
+    28                                  
+    29 0000007B 515368[BA00]E89D00-             cdecl   read_chs, BOOT, bx, cx
+    29 00000083 83C406             
+    30                                  
+    31 00000086 39D8                            cmp     ax, bx
+    32 00000088 740C                    .10Q:   jz     .10E
+    33 0000008A 68[A600]E8320083C4-     .10T:   cdecl   puts, .e0
+    33 00000092 02                 
+    34 00000093 E84B00                          call    reboot
+    35                                  .10E:
+    36                                  
+    37 00000096 E9CD05                          jmp     stage_2
+    38                                  
+    39 00000099 426F6F74696E672E2E-     .s0     db  "Booting...", 0x0A, 0x0D, 0
+    39 000000A2 2E0A0D00           
+    40 000000A6 4572726F723A207365-     .e0     db  "Error: sector read", 0
+    40 000000AF 63746F722072656164-
+    40 000000B8 00                 
+    41                                  
+    42 000000B9 00                      ALIGN 2, db 0
+    43                                  BOOT:
+    44                                      istruc  drive
+    45 000000BA 0000                            at  drive.no,       dw 0
+    46 000000BC 0000                            at  drive.cyln,     dw 0
+    47 000000BE 0000                            at  drive.head,     dw 0
+    48 000000C0 0200                            at  drive.sect,     dw 2
+    49                                      iend
+    50                                  
+    51                                  %include    "../modules/real/puts.s"
+     1                              <1> puts:
+     2                              <1> 
+     3 000000C2 55                  <1>         push    bp
+     4 000000C3 89E5                <1>         mov     bp, sp
+     5                              <1> 
+     6 000000C5 50                  <1>         push    ax
+     7 000000C6 53                  <1>         push    bx
+     8 000000C7 56                  <1>         push    si
+     9                              <1> 
+    10 000000C8 8B7604              <1>         mov     si, [bp + 4]
+    11                              <1> 
+    12 000000CB B40E                <1>         mov     ah, 0x0E
+    13 000000CD BB0000              <1>         mov     bx, 0x0000
+    14 000000D0 FC                  <1>         cld
+    15                              <1> .10L:
+    16                              <1> 
+    17 000000D1 AC                  <1>         lodsb
+    18                              <1> 
+    19 000000D2 3C00                <1>         cmp     al, 0
+    20 000000D4 7404                <1>         je      .10E
+    21                              <1> 
+    22 000000D6 CD10                <1>         int     0x10
+    23 000000D8 EBF7                <1>         jmp     .10L
+    24                              <1> .10E:
+    25                              <1> 
+    26 000000DA 5E                  <1>         pop     si
+    27 000000DB 5B                  <1>         pop     bx
+    28 000000DC 58                  <1>         pop     ax
+    29                              <1> 
+    30 000000DD 89EC                <1>         mov     sp, bp
+    31 000000DF 5D                  <1>         pop     bp
+    32                              <1> 
+    33 000000E0 C3                  <1>         ret
+    52                                  %include    "../modules/real/reboot.s"
+     1                              <1> reboot:
+     2                              <1> 
+     3 000000E1 68[FD00]E8DBFF83C4- <1>         cdecl   puts, .s0
+     3 000000E9 02                  <1>
+     4                              <1> 
+     5                              <1> .10L:
+     6                              <1> 
+     7 000000EA B410                <1>         mov     ah, 0x10
+     8 000000EC CD16                <1>         int     0x16
+     9                              <1> 
+    10 000000EE 3C20                <1>         cmp     al, ' '
+    11 000000F0 75F8                <1>         jne     .10L
+    12                              <1> 
+    13 000000F2 68[1B01]E8CAFF83C4- <1>         cdecl   puts, .s1
+    13 000000FA 02                  <1>
+    14                              <1> 
+    15 000000FB CD19                <1>         int     0x19
+    16                              <1> 
+    17 000000FD 0A0D50757368205350- <1> .s0     db  0x0A, 0x0D, "Push SPACE Key to reboot...", 0
+    17 00000106 414345204B65792074- <1>
+    17 0000010F 6F207265626F6F742E- <1>
+    17 00000118 2E2E00              <1>
+    18 0000011B 0A0D0A0D00          <1> .s1     db  0x0A, 0x0D, 0x0A, 0x0D, 0
+    53                                  %include    "../modules/real/read_chs.s"
+     1                              <1> read_chs:
+     2                              <1> 
+     3 00000120 55                  <1>         push    bp
+     4 00000121 89E5                <1>         mov     bp, sp
+     5 00000123 6A03                <1>         push    3
+     6 00000125 6A00                <1>         push    0
+     7                              <1> 
+     8 00000127 53                  <1>         push    bx
+     9 00000128 51                  <1>         push    cx
+    10 00000129 52                  <1>         push    dx
+    11 0000012A 06                  <1>         push    es
+    12 0000012B 56                  <1>         push    si
+    13                              <1> 
+    14 0000012C 8B7604              <1>         mov     si, [bp + 4]
+    15                              <1> 
+    16 0000012F 8A6C02              <1>         mov     ch, [si + drive.cyln + 0]
+    17 00000132 8A4C03              <1>         mov     cl, [si + drive.cyln + 1]
+    18 00000135 C0E106              <1>         shl     cl, 6
+    19 00000138 0A4C06              <1>         or      cl, [si + drive.sect]
+    20                              <1> 
+    21 0000013B 8A7404              <1>         mov     dh, [si + drive.head]
+    22 0000013E 8A14                <1>         mov     dl, [si + 0]
+    23 00000140 B80000              <1>         mov     ax, 0x0000
+    24 00000143 8EC0                <1>         mov     es, ax
+    25 00000145 8B5E08              <1>         mov     bx, [bp + 8]
+    26                              <1> .10L:
+    27                              <1> 
+    28 00000148 B402                <1>         mov     ah, 0x02
+    29 0000014A 8A4606              <1>         mov     al, [bp + 6]
+    30                              <1> 
+    31 0000014D CD13                <1>         int     0x13
+    32 0000014F 730C                <1>         jnc     .10E
+    33                              <1> .11E:
+    34                              <1> 
+    35 00000151 3C00                <1>         cmp     al, 0
+    36 00000153 7508                <1>         jne     .10E
+    37                              <1> 
+    38 00000155 B80000              <1>         mov     ax, 0
+    39 00000158 FF4EFE              <1>         dec     word[bp - 2]
+    40 0000015B 75EB                <1>         jnz     .10L
+    41                              <1> .10E:
+    42                              <1> 
+    43 0000015D B400                <1>         mov     ah, 0
+    44                              <1> 
+    45 0000015F 5E                  <1>         pop     si
+    46 00000160 07                  <1>         pop     es
+    47 00000161 5A                  <1>         pop     dx
+    48 00000162 59                  <1>         pop     cx
+    49 00000163 5B                  <1>         pop     bx
+    50                              <1> 
+    51 00000164 89EC                <1>         mov     sp, bp
+    52 00000166 5D                  <1>         pop     bp
+    53                              <1> 
+    54 00000167 C3                  <1>         ret
+    54                                  
+    55 00000168 00<rept>                        times   510 - ($ - $$) db 0x00
+    56 000001FE 55AA                            db      0x55, 0xAA
+    57                                  
+    58                                  FONT:
+    59 00000200 0000                    .seg:   dw 0
+    60 00000202 0000                    .off:   dw 0
+    61                                  ACPI_DATA:
+    62 00000204 00000000                .adr:   dd 0
+    63 00000208 00000000                .len:   dd 0
+    64                                  
+    65                                  %include    "../modules/real/itoa.s"
+     1                              <1> itoa:
+     2                              <1> 
+     3 0000020C 55                  <1>         push    bp
+     4 0000020D 89E5                <1>         mov     bp, sp
+     5                              <1> 
+     6 0000020F 50                  <1>         push    ax
+     7 00000210 53                  <1>         push    bx
+     8 00000211 51                  <1>         push    cx
+     9 00000212 52                  <1>         push    dx
+    10 00000213 56                  <1>         push    si
+    11 00000214 57                  <1>         push    di
+    12                              <1> 
+    13 00000215 8B4604              <1>         mov     ax, [bp + 4]
+    14 00000218 8B7606              <1>         mov     si, [bp + 6]
+    15 0000021B 8B4E08              <1>         mov     cx, [bp + 8]
+    16                              <1> 
+    17 0000021E 89F7                <1>         mov     di, si
+    18 00000220 01CF                <1>         add     di, cx
+    19 00000222 4F                  <1>         dec     di
+    20                              <1> 
+    21 00000223 8B5E0C              <1>         mov     bx, word [bp + 12]
+    22                              <1> 
+    23 00000226 F7C30100            <1>         test    bx, 0b0001
+    24 0000022A 7408                <1> .10Q:   je      .10E
+    25 0000022C 83F800              <1>         cmp     ax, 0
+    26 0000022F 7D03                <1> .12Q:   jge     .12E
+    27 00000231 83CB02              <1>         or      bx, 0b0010
+    28                              <1> .12E:
+    29                              <1> .10E:
+    30                              <1> 
+    31 00000234 F7C30200            <1>         test    bx, 0b0010
+    32 00000238 7410                <1> .20Q:   je      .20E
+    33 0000023A 83F800              <1>         cmp     ax, 0
+    34 0000023D 7D07                <1> .22Q:   jge     .22F
+    35 0000023F F7D8                <1>         neg     ax
+    36 00000241 C6042D              <1>         mov     [si], byte '-'
+    37 00000244 EB03                <1>         jmp     .22E
+    38                              <1> .22F:
+    39                              <1> 
+    40 00000246 C6042B              <1>         mov     [si], byte '+'
+    41                              <1> .22E:
+    42 00000249 49                  <1>         dec     cx
+    43                              <1> .20E:
+    44                              <1> 
+    45 0000024A 8B5E0A              <1>         mov     bx, [bp + 10]
+    46                              <1> .30L:
+    47                              <1> 
+    48 0000024D BA0000              <1>         mov     dx, 0
+    49 00000250 F7F3                <1>         div     bx
+    50                              <1> 
+    51 00000252 89D6                <1>         mov     si, dx
+    52 00000254 8A94[7C02]          <1>         mov     dl, byte [.ascii + si]
+    53                              <1> 
+    54 00000258 8815                <1>         mov     [di], dl
+    55 0000025A 4F                  <1>         dec     di
+    56                              <1> 
+    57 0000025B 83F800              <1>         cmp     ax, 0
+    58 0000025E E0ED                <1>         loopnz  .30L
+    59                              <1> .30E:
+    60                              <1> 
+    61 00000260 83F900              <1>         cmp     cx, 0
+    62 00000263 740D                <1> .40Q:   je      .40E
+    63 00000265 B020                <1>         mov     al, ' '
+    64 00000267 837E0C04            <1>         cmp     [bp + 12], word 0b0100
+    65 0000026B 7502                <1> .42Q:   jne     .42E
+    66 0000026D B030                <1>         mov     al, '0'
+    67                              <1> .42E:
+    68 0000026F FD                  <1>         std
+    69 00000270 F3AA                <1>         rep stosb
+    70                              <1> .40E:
+    71                              <1> 
+    72 00000272 5F                  <1>         pop     di
+    73 00000273 5E                  <1>         pop     si
+    74 00000274 5A                  <1>         pop     dx
+    75 00000275 59                  <1>         pop     cx
+    76 00000276 5B                  <1>         pop     bx
+    77 00000277 58                  <1>         pop     ax
+    78                              <1> 
+    79 00000278 89EC                <1>         mov     sp, bp
+    80 0000027A 5D                  <1>         pop     bp
+    81                              <1> 
+    82 0000027B C3                  <1>         ret
+    83                              <1> 
+    84 0000027C 303132333435363738- <1> .ascii  db      "0123456789ABCDEF"
+    84 00000285 39414243444546      <1>
+    66                                  %include    "../modules/real/get_drive_param.s"
+     1                              <1> get_drive_param:
+     2                              <1> 
+     3 0000028C 55                  <1>         push    bp
+     4 0000028D 89E5                <1>         mov     bp, sp
+     5                              <1> 
+     6 0000028F 53                  <1>         push    bx
+     7 00000290 51                  <1>         push    cx
+     8 00000291 06                  <1>         push    es
+     9 00000292 56                  <1>         push    si
+    10 00000293 57                  <1>         push    di
+    11                              <1> 
+    12 00000294 8B7604              <1>         mov     si, [bp + 4]
+    13                              <1> 
+    14 00000297 B80000              <1>         mov     ax, 0
+    15 0000029A 8EC0                <1>         mov     es, ax
+    16 0000029C 89C7                <1>         mov     di, ax
+    17                              <1> 
+    18 0000029E B408                <1>         mov     ah, 0x08
+    19 000002A0 8A14                <1>         mov     dl, [si + drive.no]
+    20 000002A2 CD13                <1>         int     0x13
+    21 000002A4 721B                <1> .10Q:   jc      .10F
+    22                              <1> .10T:
+    23 000002A6 88C8                <1>         mov     al, cl
+    24 000002A8 83E03F              <1>         and     ax, 0x3F
+    25                              <1> 
+    26 000002AB C0E906              <1>         shr     cl, 6
+    27 000002AE C1C908              <1>         ror     cx, 8
+    28 000002B1 41                  <1>         inc     cx
+    29                              <1> 
+    30 000002B2 0FB6DE              <1>         movzx   bx, dh
+    31 000002B5 43                  <1>         inc     bx
+    32                              <1> 
+    33 000002B6 894C02              <1>         mov     [si + drive.cyln], cx
+    34 000002B9 895C04              <1>         mov     [si + drive.head], bx
+    35 000002BC 894406              <1>         mov     [si + drive.sect], ax
+    36                              <1> 
+    37 000002BF EB03                <1>         jmp     .10E
+    38                              <1> .10F:
+    39                              <1> 
+    40 000002C1 B80000              <1>         mov     ax, 0
+    41                              <1> .10E:
+    42                              <1> 
+    43 000002C4 5F                  <1>         pop     di
+    44 000002C5 5E                  <1>         pop     si
+    45 000002C6 07                  <1>         pop     es
+    46 000002C7 59                  <1>         pop     cx
+    47 000002C8 5B                  <1>         pop     bx
+    48                              <1> 
+    49 000002C9 89EC                <1>         mov     sp, bp
+    50 000002CB 5D                  <1>         pop     bp
+    51                              <1> 
+    52 000002CC C3                  <1>         ret
+    67                                  %include    "../modules/real/get_font_adr.s"
+     1                              <1> get_font_adr:
+     2                              <1> 
+     3 000002CD 55                  <1>         push    bp
+     4 000002CE 89E5                <1>         mov     bp, sp
+     5                              <1> 
+     6 000002D0 50                  <1>         push    ax
+     7 000002D1 53                  <1>         push    bx
+     8 000002D2 56                  <1>         push    si
+     9 000002D3 06                  <1>         push    es
+    10 000002D4 55                  <1>         push    bp
+    11                              <1> 
+    12 000002D5 8B7604              <1>         mov     si, [bp + 4]
+    13                              <1> 
+    14 000002D8 B83011              <1>         mov     ax, 0x1130
+    15 000002DB B706                <1>         mov     bh, 0x06
+    16 000002DD CD10                <1>         int     10h
+    17                              <1> 
+    18 000002DF 8C04                <1>         mov     [si + 0], es
+    19 000002E1 896C02              <1>         mov     [si + 2], bp
+    20                              <1> 
+    21 000002E4 5D                  <1>         pop     bp
+    22 000002E5 07                  <1>         pop     es
+    23 000002E6 5E                  <1>         pop     si
+    24 000002E7 5B                  <1>         pop     bx
+    25 000002E8 58                  <1>         pop     ax
+    26                              <1> 
+    27 000002E9 89EC                <1>         mov     sp, bp
+    28 000002EB 5D                  <1>         pop     bp
+    29                              <1> 
+    30 000002EC C3                  <1>         ret
+    68                                  %include    "../modules/real/get_mem_info.s"
+     1                              <1> get_mem_info:
+     2                              <1> 
+     3 000002ED 6650                <1>         push    eax
+     4 000002EF 6653                <1>         push    ebx
+     5 000002F1 6651                <1>         push    ecx
+     6 000002F3 6652                <1>         push    edx
+     7 000002F5 56                  <1>         push    si
+     8 000002F6 57                  <1>         push    di
+     9 000002F7 55                  <1>         push    bp
+    10                              <1> 
+    11 000002F8 BD0000              <1>         mov     bp, 0
+    12 000002FB 66BB00000000        <1>         mov     ebx, 0
+    13                              <1> .10L:
+    14                              <1> 
+    15 00000301 66B820E80000        <1>         mov     eax, 0x0000E820
+    16                              <1> 
+    17 00000307 66B914000000        <1>         mov     ecx, E820_RECORD_SIZE
+    18 0000030D 66BA50414D53        <1>         mov     edx, 'PAMS'
+    19 00000313 BF[1004]            <1>         mov     di, .b0
+    20 00000316 CD15                <1>         int     0x15
+    21                              <1> 
+    22 00000318 663D50414D53        <1>         cmp     eax, 'PAMS'
+    23 0000031E 7402                <1>         je      .12E
+    24 00000320 EB4C                <1>         jmp     .10E
+    25                              <1> .12E:
+    26                              <1> 
+    27 00000322 7302                <1>         jnc     .14E
+    28 00000324 EB48                <1>         jmp     .10E
+    29                              <1> .14E:
+    30                              <1> 
+    31 00000326 57E8FA0083C402      <1>         cdecl   put_mem_info, di
+    32                              <1> 
+    33 0000032D 668B4510            <1>         mov     eax, [di + 16]
+    34 00000331 6683F803            <1>         cmp     eax, 3
+    35 00000335 750F                <1>         jne     .15E
+    36                              <1> 
+    37 00000337 668B05              <1>         mov     eax, [di + 0]
+    38 0000033A 66A3[0402]          <1>         mov     [ACPI_DATA.adr], eax
+    39                              <1> 
+    40 0000033E 668B4508            <1>         mov     eax, [di + 8]
+    41 00000342 66A3[0802]          <1>         mov     [ACPI_DATA.len], eax
+    42                              <1> .15E:
+    43                              <1> 
+    44 00000346 6683FB00            <1>         cmp     ebx, 0
+    45 0000034A 741C                <1>         jz      .16E
+    46                              <1> 
+    47 0000034C 45                  <1>         inc     bp
+    48 0000034D 83E507              <1>         and     bp, 0x07
+    49 00000350 7516                <1>         jnz     .16E
+    50                              <1> 
+    51 00000352 68[F603]E86AFD83C4- <1>         cdecl   puts, .s2
+    51 0000035A 02                  <1>
+    52                              <1> 
+    53 0000035B B410                <1>         mov     ah, 0x10
+    54 0000035D CD16                <1>         int     0x16
+    55                              <1> 
+    56 0000035F 68[0104]E85DFD83C4- <1>         cdecl   puts, .s3
+    56 00000367 02                  <1>
+    57                              <1> 
+    58                              <1> .16E:
+    59                              <1> 
+    60 00000368 6683FB00            <1>         cmp     ebx, 0
+    61 0000036C 7593                <1>         jne     .10L
+    62                              <1> .10E:
+    63                              <1> 
+    64 0000036E 68[C603]E84EFD83C4- <1>         cdecl   puts, .s1
+    64 00000376 02                  <1>
+    65                              <1> 
+    66 00000377 5D                  <1> 		pop		bp
+    67 00000378 5F                  <1> 		pop		di
+    68 00000379 5E                  <1> 		pop		si
+    69 0000037A 665A                <1> 		pop		edx
+    70 0000037C 6659                <1> 		pop		ecx
+    71 0000037E 665B                <1> 		pop		ebx
+    72 00000380 6658                <1> 		pop		eax
+    73                              <1> 
+    74 00000382 C3                  <1> 		ret
+    75                              <1> 
+    76 00000383 2045383230204D656D- <1> .s0:	db " E820 Memory Map:", 0x0A, 0x0D
+    76 0000038C 6F7279204D61703A0A- <1>
+    76 00000395 0D                  <1>
+    77 00000396 20426173655F5F5F5F- <1> 		db " Base_____________ Length___________ Type____", 0x0A, 0x0D, 0
+    77 0000039F 5F5F5F5F5F5F5F5F5F- <1>
+    77 000003A8 204C656E6774685F5F- <1>
+    77 000003B1 5F5F5F5F5F5F5F5F5F- <1>
+    77 000003BA 20547970655F5F5F5F- <1>
+    77 000003C3 0A0D00              <1>
+    78 000003C6 202D2D2D2D2D2D2D2D- <1> .s1:	db " ----------------- ----------------- --------", 0x0A, 0x0D, 0
+    78 000003CF 2D2D2D2D2D2D2D2D2D- <1>
+    78 000003D8 202D2D2D2D2D2D2D2D- <1>
+    78 000003E1 2D2D2D2D2D2D2D2D2D- <1>
+    78 000003EA 202D2D2D2D2D2D2D2D- <1>
+    78 000003F3 0A0D00              <1>
+    79 000003F6 203C6D6F72652E2E2E- <1> .s2:	db " <more...>", 0
+    79 000003FF 3E00                <1>
+    80 00000401 0D2020202020202020- <1> .s3:	db 0x0D, "          ", 0x0D, 0
+    80 0000040A 20200D00            <1>
+    81                              <1> 
+    82 0000040E 00<rept>            <1> ALIGN 4, db 0
+    83 00000410 00<rept>            <1> .b0:	times E820_RECORD_SIZE db 0
+    84                              <1> 
+    85                              <1> 
+    86                              <1> put_mem_info:
+    87                              <1> 
+    88 00000424 55                  <1>         push    bp
+    89 00000425 89E5                <1>         mov     bp, sp
+    90                              <1> 
+    91 00000427 53                  <1>         push    bx
+    92 00000428 56                  <1>         push    si
+    93                              <1> 
+    94 00000429 8B7604              <1>         mov     si, [bp + 4]
+    95                              <1> 
+    96 0000042C 6A046A106A0468-     <1>         cdecl	itoa, word [si + 6], .p2 + 0, 4, 16, 0b0100
+    96 00000433 [0305]FF7406E8D1FD- <1>
+    96 0000043B 83C40A              <1>
+    97 0000043E 6A046A106A0468-     <1> 		cdecl	itoa, word [si + 4], .p2 + 4, 4, 16, 0b0100
+    97 00000445 [0705]FF7404E8BFFD- <1>
+    97 0000044D 83C40A              <1>
+    98 00000450 6A046A106A0468-     <1> 		cdecl	itoa, word [si + 2], .p3 + 0, 4, 16, 0b0100
+    98 00000457 [0C05]FF7402E8ADFD- <1>
+    98 0000045F 83C40A              <1>
+    99 00000462 6A046A106A0468-     <1> 		cdecl	itoa, word [si + 0], .p3 + 4, 4, 16, 0b0100
+    99 00000469 [1005]FF34E89CFD83- <1>
+    99 00000471 C40A                <1>
+   100                              <1> 
+   101 00000473 6A046A106A0468-     <1> 		cdecl	itoa, word [si + 14], .p4 + 0, 4, 16, 0b0100
+   101 0000047A [1505]FF740EE88AFD- <1>
+   101 00000482 83C40A              <1>
+   102 00000485 6A046A106A0468-     <1> 		cdecl	itoa, word [si + 12], .p4 + 4, 4, 16, 0b0100
+   102 0000048C [1905]FF740CE878FD- <1>
+   102 00000494 83C40A              <1>
+   103 00000497 6A046A106A0468-     <1> 		cdecl	itoa, word [si + 10], .p5 + 0, 4, 16, 0b0100
+   103 0000049E [1E05]FF740AE866FD- <1>
+   103 000004A6 83C40A              <1>
+   104 000004A9 6A046A106A0468-     <1> 		cdecl	itoa, word [si + 8], .p5 + 4, 4, 16, 0b0100
+   104 000004B0 [2205]FF7408E854FD- <1>
+   104 000004B8 83C40A              <1>
+   105                              <1> 
+   106 000004BB 6A046A106A0468-     <1> 		cdecl	itoa, word [si + 18], .p6 + 0, 4, 16, 0b0100
+   106 000004C2 [2705]FF7412E842FD- <1>
+   106 000004CA 83C40A              <1>
+   107 000004CD 6A046A106A0468-     <1> 		cdecl	itoa, word [si + 16], .p6 + 4, 4, 16, 0b0100
+   107 000004D4 [2B05]FF7410E830FD- <1>
+   107 000004DC 83C40A              <1>
+   108                              <1> 
+   109 000004DF 68[0205]E8DDFB83C4- <1> 		cdecl	puts, .s1
+   109 000004E7 02                  <1>
+   110                              <1> 
+   111 000004E8 8B5C10              <1>         mov     bx, [si + 16]
+   112 000004EB 83E307              <1>         and     bx, 0x07
+   113 000004EE D1E3                <1>         shl     bx, 1
+   114 000004F0 81C3[8405]          <1>         add     bx, .t0
+   115 000004F4 FF37E8C9FB83C402    <1>         cdecl   puts, word [bx]
+   116                              <1> 
+   117 000004FC 5E                  <1>         pop     si
+   118 000004FD 5B                  <1>         pop     bx
+   119                              <1> 
+   120 000004FE 89EC                <1>         mov     sp, bp
+   121 00000500 5D                  <1>         pop     bp
+   122                              <1> 
+   123 00000501 C3                  <1>         ret
+   124                              <1> 
+   125 00000502 20                  <1> .s1:	db " "
+   126 00000503 5A5A5A5A5A5A5A5A5F  <1> .p2:	db "ZZZZZZZZ_"
+   127 0000050C 5A5A5A5A5A5A5A5A20  <1> .p3:	db "ZZZZZZZZ "
+   128 00000515 5A5A5A5A5A5A5A5A5F  <1> .p4:	db "ZZZZZZZZ_"
+   129 0000051E 5A5A5A5A5A5A5A5A20  <1> .p5:	db "ZZZZZZZZ "
+   130 00000527 5A5A5A5A5A5A5A5A00  <1> .p6:	db "ZZZZZZZZ", 0
+   131                              <1> 
+   132 00000530 2028556E6B6E6F776E- <1> .s4:	db " (Unknown)", 0x0A, 0x0D, 0
+   132 00000539 290A0D00            <1>
+   133 0000053D 2028757361626C6529- <1> .s5:	db " (usable)", 0x0A, 0x0D, 0
+   133 00000546 0A0D00              <1>
+   134 00000549 202872657365727665- <1> .s6:	db " (reserved)", 0x0A, 0x0D, 0
+   134 00000552 64290A0D00          <1>
+   135 00000557 202841435049206461- <1> .s7:	db " (ACPI data)", 0x0A, 0x0D, 0
+   135 00000560 7461290A0D00        <1>
+   136 00000566 202841435049204E56- <1> .s8:	db " (ACPI NVS)", 0x0A, 0x0D, 0
+   136 0000056F 53290A0D00          <1>
+   137 00000574 2028626164206D656D- <1> .s9:	db " (bad memory)", 0x0A, 0x0D, 0
+   137 0000057D 6F7279290A0D00      <1>
+   138                              <1> 
+   139 00000584 [3005][3D05][4905]- <1> .t0:	dw .s4, .s5, .s6, .s7, .s8, .s9, .s4, .s4
+   139 0000058A [5705][6605][7405]- <1>
+   139 00000590 [3005][3005]        <1>
+    69                                  %include    "../modules/real/kbc.s"
+     1                              <1> KBC_Data_Write:
+     2                              <1> 
+     3 00000594 55                  <1> 		push	bp								
+     4 00000595 89E5                <1> 		mov		bp, sp				
+     5                              <1> 
+     6 00000597 51                  <1> 		push	cx
+     7                              <1> 
+     8 00000598 B90000              <1> 		mov		cx, 0
+     9                              <1> .10L:
+    10                              <1> 
+    11 0000059B E464                <1> 		in		al, 0x64
+    12 0000059D A802                <1> 		test    al, 0x02
+    13 0000059F E0FA                <1> 		loopnz	.10L
+    14                              <1> 
+    15 000005A1 83F900              <1> 		cmp		cx, 0
+    16 000005A4 7405                <1> 		jz		.20E
+    17                              <1> 
+    18 000005A6 8A4604              <1>         mov		al, [bp +  4]
+    19 000005A9 E660                <1> 		out    	0x60, al	
+    20                              <1> .20E:
+    21                              <1>  
+    22 000005AB 89C8                <1> 		mov		ax, cx
+    23                              <1> 
+    24 000005AD 59                  <1> 		pop		cx
+    25                              <1> 
+    26 000005AE 89EC                <1> 		mov		sp, bp
+    27 000005B0 5D                  <1> 		pop		bp
+    28                              <1> 
+    29 000005B1 C3                  <1> 		ret
+    30                              <1> 
+    31                              <1> KBC_Data_Read:
+    32                              <1> 
+    33 000005B2 55                  <1> 		push	bp
+    34 000005B3 89E5                <1> 		mov		bp, sp
+    35                              <1> 
+    36 000005B5 51                  <1> 		push	cx
+    37 000005B6 57                  <1> 		push	di
+    38 000005B7 B90000              <1> 		mov		cx, 0
+    39                              <1> .10L:				
+    40                              <1> 
+    41 000005BA E464                <1> 		in		al, 0x64
+    42 000005BC A801                <1> 		test    al, 0x01
+    43 000005BE E1FA                <1> 		loopz	.10L	
+    44                              <1> 
+    45 000005C0 83F900              <1> 		cmp		cx, 0
+    46 000005C3 7409                <1> 		jz		.20E
+    47                              <1> 
+    48 000005C5 B400                <1> 		mov		ah, 0x00
+    49 000005C7 E460                <1> 		in     	al, 0x60
+    50                              <1>    
+    51 000005C9 8B7E04              <1> 		mov		di, [bp + 4]
+    52 000005CC 8905                <1> 		mov		[di + 0], ax
+    53                              <1> .20E:
+    54                              <1>  
+    55 000005CE 89C8                <1> 		mov		ax, cx
+    56                              <1> 
+    57 000005D0 5F                  <1> 		pop		di
+    58 000005D1 59                  <1> 		pop		cx
+    59                              <1> 
+    60 000005D2 89EC                <1> 		mov		sp, bp
+    61 000005D4 5D                  <1> 		pop		bp
+    62                              <1> 
+    63 000005D5 C3                  <1> 		ret
+    64                              <1> 
+    65                              <1> KBC_Cmd_Write:
+    66                              <1> 
+    67 000005D6 55                  <1> 		push	bp
+    68 000005D7 89E5                <1> 		mov		bp, sp
+    69                              <1> 
+    70 000005D9 51                  <1> 		push	cx
+    71                              <1> 
+    72 000005DA B90000              <1> 		mov		cx, 0
+    73                              <1> .10L:	
+    74                              <1> 			
+    75 000005DD E464                <1> 		in		al, 0x64
+    76 000005DF A802                <1> 		test    al, 0x02
+    77 000005E1 E0FA                <1> 		loopnz	.10L
+    78                              <1> 
+    79 000005E3 83F900              <1> 		cmp		cx, 0
+    80 000005E6 7405                <1> 		jz		.20E
+    81                              <1> 
+    82 000005E8 8A4604              <1> 		mov		al, [bp + 4]
+    83 000005EB E664                <1> 		out    	0x64, al
+    84                              <1> .20E:
+    85                              <1> 
+    86 000005ED 89C8                <1> 		mov		ax, cx
+    87                              <1> 
+    88 000005EF 59                  <1> 		pop		cx
+    89                              <1> 
+    90 000005F0 89EC                <1> 		mov		sp, bp
+    91 000005F2 5D                  <1> 		pop		bp
+    92                              <1> 
+    93 000005F3 C3                  <1> 		ret
+    94                              <1> 
+    70                                  %include    "../modules/real/lba_chs.s"
+     1                              <1> lba_chs:
+     2                              <1> 
+     3 000005F4 55                  <1>         push    bp
+     4 000005F5 89E5                <1>         mov     bp, sp
+     5                              <1> 
+     6 000005F7 50                  <1>         push    ax
+     7 000005F8 53                  <1>         push    bx
+     8 000005F9 52                  <1>         push    dx
+     9 000005FA 56                  <1>         push    si
+    10 000005FB 57                  <1>         push    di
+    11                              <1> 
+    12 000005FC 8B7604              <1>         mov     si, [bp + 4]
+    13 000005FF 8B7E06              <1>         mov     di, [bp + 6]
+    14                              <1> 
+    15 00000602 8A4404              <1>         mov     al, [si + drive.head]
+    16 00000605 F66406              <1>         mul     byte [si + drive.sect]
+    17 00000608 89C3                <1>         mov     bx, ax
+    18                              <1> 
+    19 0000060A BA0000              <1>         mov     dx, 0
+    20 0000060D 8B4608              <1>         mov     ax, [bp + 8]
+    21 00000610 F7F3                <1>         div     bx
+    22                              <1> 
+    23 00000612 894502              <1>         mov     [di + drive.cyln], ax
+    24                              <1> 
+    25 00000615 89D0                <1>         mov     ax, dx
+    26 00000617 F67406              <1>         div     byte [si + drive.sect]
+    27                              <1> 
+    28 0000061A 0FB6D4              <1>         movzx   dx, ah
+    29 0000061D 42                  <1>         inc     dx
+    30                              <1> 
+    31 0000061E B400                <1>         mov     ah, 0x00
+    32                              <1> 
+    33 00000620 894504              <1>         mov     [di + drive.head], ax
+    34 00000623 895506              <1>         mov     [di + drive.sect], dx
+    35                              <1> 
+    36 00000626 5F                  <1>         pop		di
+    37 00000627 5E                  <1> 		pop		si
+    38 00000628 5A                  <1> 		pop		dx
+    39 00000629 5B                  <1> 		pop		bx
+    40 0000062A 58                  <1> 		pop		ax
+    41                              <1> 
+    42 0000062B 89EC                <1> 		mov		sp, bp
+    43 0000062D 5D                  <1> 		pop		bp
+    44                              <1> 
+    45 0000062E C3                  <1> 		ret
+    71                                  %include    "../modules/real/read_lba.s"
+     1                              <1> read_lba:
+     2                              <1> 
+     3 0000062F 55                  <1>         push    bp
+     4 00000630 89E5                <1>         mov     bp, sp
+     5                              <1> 
+     6 00000632 56                  <1>         push    si
+     7                              <1> 
+     8 00000633 8B7604              <1>         mov     si, [bp + 4]
+     9                              <1> 
+    10 00000636 8B4606              <1>         mov     ax, [bp + 6]
+    11 00000639 5068[5E06]56E8B3FF- <1>         cdecl   lba_chs, si, .chs, ax
+    11 00000641 83C406              <1>
+    12                              <1> 
+    13 00000644 8A04                <1>         mov     al, [si + drive.no]
+    14 00000646 A2[5E06]            <1>         mov     [.chs + drive.no], al
+    15                              <1> 
+    16 00000649 FF760AFF760868-     <1>         cdecl   read_chs, .chs, word [bp + 8], word [bp + 10]
+    16 00000650 [5E06]E8CBFA83C406  <1>
+    17                              <1> 
+    18 00000658 5E                  <1>         pop     si
+    19                              <1> 
+    20 00000659 89EC                <1>         mov     sp, bp
+    21 0000065B 5D                  <1>         pop     bp
+    22                              <1> 
+    23 0000065C C3                  <1>         ret
+    24                              <1> 
+    25 0000065D 90                  <1> ALIGN 2
+    26 0000065E 00<rept>            <1> .chs:   times drive_size    db 0
+    72                                  
+    73                                  stage_2:
+    74                                  
+    75 00000666 68[E006]E856FA83C4-     		cdecl	puts, .s0
+    75 0000066E 02                 
+    76                                  
+    77 0000066F 68[BA00]E817FC83C4-     		cdecl	get_drive_param, BOOT
+    77 00000677 02                 
+    78 00000678 83F800                  		cmp		ax, 0
+    79 0000067B 750C                    .10Q:	jne		.10E
+    80 0000067D 68[1707]E83FFA83C4-     .10T:	cdecl	puts, .e0
+    80 00000685 02                 
+    81 00000686 E858FA                  		call	reboot
+    82                                  .10E:
+    83                                  
+    84 00000689 A1[BA00]                		mov		ax, [BOOT + drive.no]
+    85 0000068C 6A046A106A0268-         		cdecl	itoa, ax, .p1, 2, 16, 0b0100
+    85 00000693 [F806]50E873FB83C4-
+    85 0000069B 0A                 
+    86 0000069C A1[BC00]                		mov		ax, [BOOT + drive.cyln]
+    87 0000069F 6A046A106A0468-         		cdecl	itoa, ax, .p2, 4, 16, 0b0100
+    87 000006A6 [0007]50E860FB83C4-
+    87 000006AE 0A                 
+    88 000006AF A1[BE00]                		mov		ax, [BOOT + drive.head]
+    89 000006B2 6A046A106A0268-         		cdecl	itoa, ax, .p3, 2, 16, 0b0100
+    89 000006B9 [0A07]50E84DFB83C4-
+    89 000006C1 0A                 
+    90 000006C2 A1[C000]                		mov		ax, [BOOT + drive.sect]
+    91 000006C5 6A046A106A0268-         		cdecl	itoa, ax, .p4, 2, 16, 0b0100
+    91 000006CC [1207]50E83AFB83C4-
+    91 000006D4 0A                 
+    92 000006D5 68[EF06]E8E7F983C4-     		cdecl	puts, .s1
+    92 000006DD 02                 
+    93                                  
+    94 000006DE EB52                    		jmp		stage_3
+    95                                  
+    96 000006E0 326E64207374616765-     .s0		db	"2nd stage...", 0x0A, 0x0D, 0
+    96 000006E9 2E2E2E0A0D00       
+    97                                  
+    98 000006EF 2044726976653A3078      .s1		db	" Drive:0x"
+    99 000006F8 20202C20433A3078        .p1		db	"  , C:0x"
+   100 00000700 202020202C20483A30-     .p2		db	"    , H:0x"
+   100 00000709 78                 
+   101 0000070A 20202C20533A3078        .p3		db	"  , S:0x"
+   102 00000712 20200A0D00              .p4		db	"  ", 0x0A, 0x0D, 0
+   103                                  
+   104 00000717 43616E277420676574-     .e0		db	"Can't get drive parameter.", 0
+   104 00000720 206472697665207061-
+   104 00000729 72616D657465722E00 
+   105                                  
+   106                                  stage_3:
+   107                                  
+   108 00000732 68[AF07]E88AF983C4-             cdecl   puts, .s0
+   108 0000073A 02                 
+   109                                  
+   110 0000073B 68[0002]E88CFB83C4-             cdecl   get_font_adr, FONT
+   110 00000743 02                 
+   111                                  
+   112 00000744 6A046A106A0468-                 cdecl   itoa, word [FONT.seg], .p1, 4, 16, 0b0100
+   112 0000074B [CB07]FF36[0002]E8-
+   112 00000752 B8FA83C40A         
+   113 00000757 6A046A106A0468-                 cdecl   itoa, word [FONT.off], .p2, 4, 16, 0b0100
+   113 0000075E [CF07]FF36[0202]E8-
+   113 00000765 A5FA83C40A         
+   114 0000076A 68[BE07]E852F983C4-             cdecl   puts, .s1
+   114 00000772 02                 
+   115                                  
+   116 00000773 E877FB                          cdecl   get_mem_info
+   117                                  
+   118 00000776 66A1[0402]                      mov     eax, [ACPI_DATA.adr]
+   119 0000077A 6683F800                        cmp     eax, 0
+   120 0000077E 742D                            je      .10E
+   121                                  
+   122 00000780 6A046A106A0468-                 cdecl   itoa, ax, .p4, 4, 16, 0b0100
+   122 00000787 [E707]50E87FFA83C4-
+   122 0000078F 0A                 
+   123 00000790 66C1E810                        shr     eax, 16
+   124 00000794 6A046A106A0468-                 cdecl   itoa, ax, .p3, 4, 16, 0b0100
+   124 0000079B [E307]50E86BFA83C4-
+   124 000007A3 0A                 
+   125                                  
+   126 000007A4 68[D907]E818F983C4-             cdecl   puts, .s2
+   126 000007AC 02                 
+   127                                  .10E:
+   128                                  
+   129 000007AD EB3F                            jmp     stage_4
+   130                                  
+   131 000007AF 337264207374616765-     .s0     db  "3rd stage...", 0x0A, 0x0D, 0
+   131 000007B8 2E2E2E0A0D00       
+   132 000007BE 466F6E742041646472-     .s1     db  "Font Address="
+   132 000007C7 6573733D           
+   133 000007CB 5A5A5A5A                .p1     db  "ZZZZ"
+   134 000007CF 5A5A5A5A0A0D00          .p2     db  "ZZZZ", 0x0A, 0x0D, 0
+   135 000007D6 0A0D00                          db  0x0A, 0x0D, 0
+   136                                      
+   137 000007D9 414350492064617461-     .s2     db  "ACPI data="
+   137 000007E2 3D                 
+   138 000007E3 5A5A5A5A                .p3     db  "ZZZZ"
+   139 000007E7 5A5A5A5A0A0D00          .p4     db  "ZZZZ", 0x0A, 0x0D, 0
+   140                                      
+   141                                  stage_4:
+   142                                  
+   143 000007EE 68[C208]E8CEF883C4-             cdecl   puts, .s0
+   143 000007F6 02                 
+   144                                  
+   145 000007F7 FA                              cli
+   146                                  
+   147 000007F8 68AD00E8D8FD83C402              cdecl   KBC_Cmd_Write, 0xAD
+   148                                  
+   149 00000801 68D000E8CFFD83C402              cdecl   KBC_Cmd_Write, 0xD0
+   150 0000080A 68[0909]E8A2FD83C4-             cdecl   KBC_Data_Read, .key
+   150 00000812 02                 
+   151                                  
+   152 00000813 8A1E[0909]                      mov     bl, [.key]
+   153 00000817 80CB02                          or      bl, 0x02
+   154                                  
+   155 0000081A 68D100E8B6FD83C402              cdecl   KBC_Cmd_Write, 0xD1
+   156 00000823 53E86DFD83C402                  cdecl   KBC_Data_Write, bx
+   157                                  
+   158 0000082A 68AE00E8A6FD83C402              cdecl   KBC_Cmd_Write, 0xAE
+   159                                  
+   160 00000833 FB                              sti
+   161                                  
+   162 00000834 68[D108]E888F883C4-             cdecl   puts, .s1
+   162 0000083C 02                 
+   163                                  
+   164 0000083D 68[E408]E87FF883C4-             cdecl   puts, .s2
+   164 00000845 02                 
+   165                                  
+   166 00000846 BB0000                          mov     bx, 0
+   167                                  .10L:
+   168                                  
+   169 00000849 B400                            mov     ah, 0x00
+   170 0000084B CD16                            int     0x16
+   171                                  
+   172 0000084D 3C31                            cmp     al, '1'
+   173 0000084F 7266                            jb      .10E
+   174                                  
+   175 00000851 3C33                            cmp     al, '3'
+   176 00000853 7762                            ja      .10E
+   177                                  
+   178 00000855 88C1                            mov     cl, al
+   179 00000857 FEC9                            dec     cl
+   180 00000859 80E103                          and     cl, 0x03
+   181 0000085C B80100                          mov     ax, 0x0001
+   182 0000085F D3E0                            shl     ax, cl
+   183 00000861 31C3                            xor     bx, ax
+   184                                  
+   185 00000863 FA                              cli
+   186                                  
+   187 00000864 68AD00E86CFD83C402              cdecl   KBC_Cmd_Write, 0xAD
+   188                                  
+   189 0000086D 68ED00E821FD83C402              cdecl   KBC_Data_Write, 0xED
+   190 00000876 68[0909]E836FD83C4-             cdecl   KBC_Data_Read, .key
+   190 0000087E 02                 
+   191                                  
+   192 0000087F 803E[0909]FA                    cmp     [.key], byte 0xFA
+   193 00000884 7509                            jne     .11F
+   194                                  
+   195 00000886 53E80AFD83C402                  cdecl   KBC_Data_Write, bx
+   196                                  
+   197 0000088D EB1C                            jmp     .11E
+   198                                  .11F:
+   199 0000088F 6A046A106A0268-                 cdecl   itoa, word [.key], .e1, 2, 16, 0b0100
+   199 00000896 [0509]FF36[0909]E8-
+   199 0000089D 6DF983C40A         
+   200 000008A2 68[0409]E81AF883C4-             cdecl   puts, .e0
+   200 000008AA 02                 
+   201                                  .11E:
+   202                                  
+   203 000008AB 68AE00E825FD83C402              cdecl   KBC_Cmd_Write, 0xAE
+   204                                  
+   205 000008B4 FB                              sti
+   206                                  
+   207 000008B5 EB92                            jmp     .10L
+   208                                  .10E:
+   209                                  
+   210 000008B7 68[FA08]E805F883C4-             cdecl   puts, .s3
+   210 000008BF 02                 
+   211                                  
+   212 000008C0 EB49                            jmp     stage_5
+   213                                  
+   214 000008C2 347468207374616765-     .s0     db  "4th stage...", 0x0A, 0x0D, 0
+   214 000008CB 2E2E2E0A0D00       
+   215 000008D1 413230204761746520-     .s1     db  "A20 Gate Enabled", 0x0A, 0x0D, 0
+   215 000008DA 456E61626C65640A0D-
+   215 000008E3 00                 
+   216 000008E4 204B6579626F617264-     .s2 	db	" Keyboard LED Test...", 0
+   216 000008ED 204C45442054657374-
+   216 000008F6 2E2E2E00           
+   217 000008FA 2028646F6E65290A0D-     .s3 	db	" (done)", 0x0A, 0x0D, 0
+   217 00000903 00                 
+   218 00000904 5B                      .e0 	db	"["
+   219 00000905 5A5A5D00                .e1 	db	"ZZ]", 0
+   220                                  
+   221 00000909 0000                    .key    dw  0
+   222                                  
+   223                                  stage_5:
+   224                                  
+   225 0000090B 68[3709]E8B1F783C4-             cdecl   puts, .s0
+   225 00000913 02                 
+   226                                  
+   227 00000914 68009C6A106A1068-               cdecl   read_lba, BOOT, BOOT_SECT, KERNEL_SECT, BOOT_END
+   227 0000091C [BA00]E80EFD83C408 
+   228                                  
+   229 00000924 83F810                          cmp     ax, KERNEL_SECT
+   230 00000927 740C                    .10Q:   jz      .10E
+   231 00000929 68[4609]E893F783C4-     .10T:   cdecl   puts, .e0
+   231 00000931 02                 
+   232 00000932 E8ACF7                          call    reboot
+   233                                  .10E:
+   234                                  
+   235 00000935 EB29                            jmp     stage_6
+   236                                  
+   237 00000937 357468207374616765-     .s0     db  "5th stage...", 0x0A, 0x0D, 0
+   237 00000940 2E2E2E0A0D00       
+   238 00000946 204661696C75726520-     .e0		db	" Failure load kernel...", 0x0A, 0x0D, 0
+   238 0000094F 6C6F6164206B65726E-
+   238 00000958 656C2E2E2E0A0D00   
+   239                                  
+   240                                  stage_6:
+   241                                  
+   242 00000960 68[7809]E85CF783C4-             cdecl   puts, .s0
+   242 00000968 02                 
+   243                                  
+   244                                  .10L:
+   245                                  
+   246 00000969 B400                            mov     ah, 0x00
+   247 0000096B CD16                            int     0x16
+   248 0000096D 3C20                            cmp     al, ' '
+   249 0000096F 75F8                            jne     .10L
+   250                                  
+   251 00000971 B81200                          mov     ax, 0x0012
+   252 00000974 CD10                            int     0x10
+   253                                  
+   254 00000976 EB5C                            jmp     stage_7
+   255                                  
+   256 00000978 367468207374616765-     .s0     db  "6th stage...", 0x0A, 0x0D, 0x0A, 0x0D
+   256 00000981 2E2E2E0A0D0A0D     
+   257 00000988 5B5075736820535041-             db  "[Push SPACE key to protect mode...]", 0x0A, 0x0D, 0
+   257 00000991 4345206B657920746F-
+   257 0000099A 2070726F7465637420-
+   257 000009A3 6D6F64652E2E2E5D0A-
+   257 000009AC 0D00               
+   258                                  
+   259 000009AE 00<rept>                ALIGN 4, db 0
+   260 000009B0 0000000000000000        GDT:    dq  0x00_0_0_0_0_000000_0000
+   261 000009B8 FFFF0000009ACF00        .cs:    dq  0x00_C_F_9_A_000000_FFFF
+   262 000009C0 FFFF00000092CF00        .ds:    dq  0x00_C_F_9_2_000000_FFFF
+   263                                  .gdt_end:
+   264                                  
+   265                                  SEL_CODE    equ .cs - GDT
+   266                                  SEL_DATA    equ .ds - GDT
+   267                                  
+   268 000009C8 1700                    GDTR:   dw      GDT.gdt_end - GDT - 1
+   269 000009CA [B0090000]                      dd      GDT
+   270                                  
+   271 000009CE 0000                    IDTR:   dw      0
+   272 000009D0 00000000                        dd      0
+   273                                  
+   274                                  stage_7:
+   275 000009D4 FA                              cli
+   276                                  
+   277 000009D5 0F0116[C809]                    lgdt    [GDTR]
+   278 000009DA 0F011E[CE09]                    lidt    [IDTR]
+   279                                  
+   280 000009DF 0F20C0                          mov     eax, cr0
+   281 000009E2 83C801                          or      ax, 1
+   282 000009E5 0F22C0                          mov     cr0, eax
+   283                                  
+   284 000009E8 EB00                            jmp     $ + 2
+   285                                  
+   286                                  [BITS 32]
+   287 000009EA 66                              DB      0x66
+   288 000009EB EA[F2090000]0800                jmp     SEL_CODE:CODE_32
+   289                                  
+   290                                  CODE_32:
+   291                                  
+   292 000009F2 66B81000                        mov     ax, SEL_DATA
+   293 000009F6 8ED8                            mov     ds, ax
+   294 000009F8 8EC0                            mov     es, ax
+   295 000009FA 8EE0                            mov     fs, ax
+   296 000009FC 8EE8                            mov     gs, ax
+   297 000009FE 8ED0                            mov     ss, ax
+   298                                  
+   299 00000A00 B900080000                      mov     ecx, (KERNEL_SIZE) / 4
+   300 00000A05 BE009C0000                      mov     esi, BOOT_END
+   301 00000A0A BF00101000                      mov     edi, KERNEL_LOAD
+   302 00000A0F FC                              cld
+   303 00000A10 F3A5                            rep movsd
+   304                                  
+   305 00000A12 E9(00101000)                    jmp     KERNEL_LOAD
+   306                                  
+   307 00000A17 00<rept>                        times   BOOT_SIZE - ($ - $$)   db 0
