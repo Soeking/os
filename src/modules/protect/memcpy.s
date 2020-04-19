@@ -8,9 +8,9 @@ memcpy:
     push    edi
 
     cld
-    mov     edi, [ebp + 4]
-    mov     esi, [ebp + 6]
-    mov     ecx, [ebp + 8]
+    mov     edi, [ebp + 8]
+    mov     esi, [ebp + 12]
+    mov     ecx, [ebp + 16]
 
     rep movsb
 
