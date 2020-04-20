@@ -35,3 +35,21 @@
         CR3_TASK_4          equ     0x0020_0000
         CR3_TASK_5          equ     0x0020_2000
         CR3_TASK_6          equ     0x0020_4000
+
+        FAT_SIZE            equ     (1024 * 128)
+        ROOT_SIZE           equ     (1024 * 16)
+
+        ENTRY_SIZE          equ     32
+
+        FAT_OFFSET          equ     (BOOT_SIZE + KERNEL_SIZE)
+        FAT1_START          equ     (KERNEL_SIZE)
+        FAT2_START          equ     (FAT1_START + FAT_SIZE)
+        ROOT_START          equ     (FAT2_START + FAT_SIZE)
+        FILE_START          equ     (ROOT_START + ROOT_SIZE)
+
+        ATTR_READ_ONLY      equ     0x01
+        ATTR_HIDDEN         equ     0x02
+        ATTR_SYSTEM         equ     0x04
+        ATTR_VOLUME_ID      equ     0x08
+        ATTR_DIRECTORY      equ     0x10
+        ATTR_ARCHIVE        equ     0x20
